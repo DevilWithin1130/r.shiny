@@ -238,7 +238,7 @@ jobs:
             --firewall-name privatefirewall \
             --protocols TCP \
             --resource-group RenoPilotRG \
-            --source-addresses "*" \
+            --source-addresses 10.0.1.0/24 \
             --destination-addresses 10.0.2.0/24 \
             --action Allow \
             --priority 200
