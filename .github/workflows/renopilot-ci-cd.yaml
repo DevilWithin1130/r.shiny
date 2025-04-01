@@ -97,28 +97,46 @@ jobs:
           # Create Resource Group
           echo "Creating Resource Group..."
           az group create --name RenoPilotRG --location australiaeast
-
+          
+          # Verify resource group was created
+          echo "Verifying Resource Group creation..."
+          if ! az group show --name RenoPilotRG &>/dev/null; then
+            echo "Error: Resource group RenoPilotRG was not created successfully."
+            exit 1
+          fi
+          
+          # Add a short delay to ensure resource group is fully provisioned
+          echo "Waiting for resource group to be fully provisioned..."
+          sleep 10
+          
           # VNet with /16 CIDR block allowing up to 65,536 IP addresses
           echo "Creating VNet..."
           az network vnet create \
-            --name RenoPilotVPC \
+            --name renopilot-vpc \
             --resource-group RenoPilotRG \
             --location australiaeast \
             --address-prefix 10.0.0.0/16
-
+          
+          # Verify VNet was created
+          echo "Verifying VNet creation..."
+          if ! az network vnet show --name renopilot-vpc --resource-group RenoPilotRG &>/dev/null; then
+            echo "Error: VNet renopilot-vpc was not created successfully."
+            exit 1
+          fi
+          
           # Public subnet with /24 CIDR block allowing up to 256 IP addresses
           echo "Creating Public Subnet..."
           az network vnet subnet create \
             --name PublicSubnet \
-            --vnet-name RenoPilotVPC \
+            --vnet-name renopilot-vpc \
             --resource-group RenoPilotRG \
             --address-prefix 10.0.1.0/24
-
+          
           # Private subnet for sensitive resources with /24 CIDR block
           echo "Creating Private Subnet..."
           az network vnet subnet create \
             --name PrivateSubnet \
-            --vnet-name RenoPilotVPC \
+            --vnet-name renopilot-vpc \
             --resource-group RenoPilotRG \
             --address-prefix 10.0.2.0/24
 
