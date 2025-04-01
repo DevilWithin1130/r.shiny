@@ -1,0 +1,152 @@
+name: RenoPilot Infrastructure
+
+on: [push, workflow_dispatch]
+
+jobs:
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@main
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create VPC and Subnets
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Create Resource Group
+          az group create --name RenoPilotRG --location australiaeast
+
+          # VNet with /16 CIDR block allowing up to 65,536 IP addresses
+          az network vnet create \
+            --name RenoPilotVPC \
+            --resource-group RenoPilotRG \
+            --location australiaeast \
+            --address-prefix 10.0.0.0/16
+
+          # Public subnet with /24 CIDR block allowing up to 256 IP addresses
+          az network vnet subnet create \
+            --name PublicSubnet \
+            --vnet-name RenoPilotVPC \
+            --resource-group RenoPilotRG \
+            --address-prefix 10.0.1.0/24
+
+          # Private subnet for sensitive resources with /24 CIDR block
+          az network vnet subnet create \
+            --name PrivateSubnet \
+            --vnet-name RenoPilotVPC \
+            --resource-group RenoPilotRG \
+            --address-prefix 10.0.2.0/24
+
+    - name: Deploy Firewalls
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Create Public Firewall
+          az network firewall create \
+            --name PublicFirewall \
+            --resource-group RenoPilotRG \
+            --location australiaeast
+
+          # Create Private Firewall
+          az network firewall create \
+            --name PrivateFirewall \
+            --resource-group RenoPilotRG \
+            --location australiaeast
+
+    - name: Deploy Container Registry
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          ACR_NAME="RenoPilotRegistry"
+          # Premium SKU required for advanced features:
+          # - Virtual Network support
+          # - Enhanced throughput
+          # - Geo-replication capability
+          # - Content trust for image tag signing
+          az acr create \
+            --resource-group RenoPilotRG \
+            --name $ACR_NAME \
+            --sku Premium \
+            --location australiaeast \
+            --admin-enabled true  # Enables admin authentication for testing, consider disabling in production
+          
+          # Retrieve and store registry credentials securely in GitHub environment
+          ACR_LOGIN_SERVER=$(az acr show -n $ACR_NAME --query loginServer -o tsv)
+          ACR_USERNAME=$(az acr credential show -n $ACR_NAME --query username -o tsv)
+          ACR_PASSWORD=$(az acr credential show -n $ACR_NAME --query "passwords[0].value" -o tsv)
+          
+          echo "::set-output name=login_server::$ACR_LOGIN_SERVER"
+          echo "::add-mask::$ACR_PASSWORD"
+          echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
+          echo "ACR_USERNAME=$ACR_USERNAME" >> $GITHUB_ENV
+          echo "ACR_PASSWORD=$ACR_PASSWORD" >> $GITHUB_ENV
+
+    - name: Build and push image
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ env.ACR_LOGIN_SERVER }}
+        username: ${{ env.ACR_USERNAME }}
+        password: ${{ env.ACR_PASSWORD }}
+    - run: |
+        docker build . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+        docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+
+    - name: Deploy to Azure Container Instances
+      uses: azure/aci-deploy@v1
+      with:
+        resource-group: RenoPilotRG
+        dns-name-label: renopilot-${{ github.run_number }}  # DNS label makes the container accessible via: renopilot-{run-number}.australiaeast.azurecontainer.io
+        image: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}  # Using SHA for immutable image versioning
+        registry-login-server: ${{ env.ACR_LOGIN_SERVER }}
+        registry-username: ${{ env.ACR_USERNAME }}
+        registry-password: ${{ env.ACR_PASSWORD }}
+        name: RenoPilotFenceAppInstance
+        location: australiaeast
+        vnet: RenoPilotVPC
+        subnet: PublicSubnet
+        ports: 80  # Expose HTTP port for web traffic
+
+    - name: Deploy Database
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Create Azure SQL Server with secure admin credentials
+          az sql server create \
+            --name renopilot-fenceapp-db \
+            --resource-group RenoPilotRG \
+            --location australiaeast \
+            --admin-user dbadmin  # Consider using managed identity in production
+            --admin-password ${{ secrets.DB_PASSWORD }}
+
+    - name: Configure Network Security Rules
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Allow SQL traffic (port 1433) only from public subnet to private subnet
+          az network firewall network-rule create \
+            --collection-name SQLTraffic \
+            --destination-ports 1433 \
+            --firewall-name PrivateFirewall \
+            --name SQLRule \
+            --protocols TCP \
+            --resource-group RenoPilotRG \
+            --source-addresses 10.0.1.0/24 \
+            --destination-addresses 10.0.2.0/24 \
+            --action Allow
+
+          # Allow Docker registry traffic (port 5000) with wider access for image pulls
+          az network firewall network-rule create \
+            --collection-name DockerTraffic \
+            --destination-ports 5000 \
+            --firewall-name PrivateFirewall \
+            --name DockerRule \
+            --protocols TCP \
+            --resource-group RenoPilotRG \
+            --source-addresses "*" \
+            --destination-addresses 10.0.2.0/24 \
+            --action Allow

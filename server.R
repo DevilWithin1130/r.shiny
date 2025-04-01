@@ -8,22 +8,36 @@ if (Sys.getenv("DOCKER_ENV") == "true") {
   # In Docker: Use environment variables
   message("Running in Docker environment, using environment variables for database connection")
   
-  # Get DB configuration from environment variables
-  db_config <- list(
-    driver = Sys.getenv("DB_DRIVER"),
-    server = Sys.getenv("DB_SERVER"),
-    database = Sys.getenv("DB_NAME"),
-    uid = Sys.getenv("DB_USER"),
-    pwd = Sys.getenv("DB_PASSWORD"),
-    port = Sys.getenv("DB_PORT", "1433")
-  )
+  # Check if DSN is provided
+  dsn <- Sys.getenv("DB_DSN", "")
   
-  # Only attempt DB connection if server is specified
-  if (db_config$server != "") {
+  if (dsn != "") {
+    # Use DSN for connection
+    message("Using DSN for database connection: ", dsn)
+    db_config <- list(
+      dsn = dsn,
+      uid = Sys.getenv("DB_USER"),
+      pwd = Sys.getenv("DB_PASSWORD")
+    )
+  } else {
+    # Use direct connection parameters
+    message("No DSN provided. Using direct connection parameters")
+    db_config <- list(
+      driver = Sys.getenv("DB_DRIVER"),
+      server = Sys.getenv("DB_SERVER"),
+      database = Sys.getenv("DB_NAME"),
+      uid = Sys.getenv("DB_USER"),
+      pwd = Sys.getenv("DB_PASSWORD"),
+      port = Sys.getenv("DB_PORT", "1433")
+    )
+  }
+  
+  # Only attempt DB connection if server or DSN is specified
+  if ((dsn != "") || (db_config$server != "")) {
     tryCatch({
       configuration <- as.data.frame(db_config)
       storage <- configuration |> Storage::Storage(type = "odbc")
-      message("Successfully connected to database via environment variables")
+      message("Successfully connected to database")
     }, error = function(e) {
       message("Error connecting to database: ", e$message)
       message("Falling back to memory storage")
@@ -35,7 +49,7 @@ if (Sys.getenv("DOCKER_ENV") == "true") {
       }
     })
   } else {
-    message("No database server specified. Using memory storage.")
+    message("No database server or DSN specified. Using memory storage.")
     storage <- configuration |> Storage::Storage(type = "memory")
     # Optionally seed with mock data
     if (exists("Todo.Mock.Data")) {

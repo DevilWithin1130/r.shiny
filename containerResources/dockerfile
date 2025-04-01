@@ -36,12 +36,13 @@ RUN R -e "devtools::install_github('FlippieCoetser/Storage')"
 
 # Set environment variables for database connection
 # These will be overridden when running the container
-ENV DB_DRIVER="ODBC Driver 17 for SQL Server" \
-    DB_SERVER="" \
-    DB_NAME="" \
-    DB_USER="" \
-    DB_PASSWORD="" \
+ENV DB_DRIVER="ODBC Driver 18 for SQL Server" \
+    DB_SERVER="shiny.database.windows.net" \
+    DB_NAME="Shiny" \
+    DB_USER="shiny" \
+    DB_PASSWORD="j*$bQCCrsj9&J!H2" \
     DB_PORT="1433" \
+    DB_DSN="Shiny" \
     DOCKER_ENV="true"
 
 # Copy shiny app into the directory /srv/shiny-server/
