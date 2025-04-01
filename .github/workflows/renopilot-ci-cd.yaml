@@ -226,7 +226,7 @@ jobs:
             --protocols TCP \
             --resource-group RenoPilotRG \
             --source-addresses 10.0.1.0/24 \
-            --destination-addresses 10.0.2.0/24 \
+            --destination-addresses "*" \
             --action Allow \
             --priority 100
           
