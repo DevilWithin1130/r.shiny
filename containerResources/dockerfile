@@ -30,8 +30,8 @@ COPY . /srv/shiny-server/
 
 RUN chown -R shiny:shiny /srv/shiny-server
 
-# Open docker port 3838
-EXPOSE 3838
+# Open docker ports - expose both 3838 (Shiny) and 80 (HTTP)
+EXPOSE 3838 80
 
 USER shiny
 
