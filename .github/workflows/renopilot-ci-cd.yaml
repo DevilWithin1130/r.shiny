@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout Code Base
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Set up R Environment
         uses: r-lib/actions/setup-r@v2
@@ -57,15 +57,49 @@ jobs:
       uses: azure/login@v1
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: Check and Clean Existing Infrastructure
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Check if resource group exists
+          RG_EXISTS=$(az group exists --name RenoPilotRG)
+          
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "Existing infrastructure found. Cleaning up in proper order..."
+            
+            # 1. Delete Container Instances first (they depend on other resources)
+            echo "Deleting Container Instances..."
+            az container delete --name renopilotfenceappinstance --resource-group RenoPilotRG --yes || true
+            
+            # 2. Delete ACR
+            echo "Deleting Azure Container Registry..."
+            az acr delete --name renopilotregistry --resource-group RenoPilotRG --yes || true
+            
+            # 3. Delete Firewalls
+            echo "Deleting Firewalls..."
+            az network firewall delete --name publicfirewall --resource-group RenoPilotRG || true
+            az network firewall delete --name privatefirewall --resource-group RenoPilotRG || true
+            
+            # 4. Delete VNet and subnets
+            echo "Deleting VNet and subnets..."
+            az network vnet delete --name RenoPilotVPC --resource-group RenoPilotRG || true
+            
+            echo "Infrastructure cleanup complete."
+          else
+            echo "No existing infrastructure found. Proceeding with fresh deployment."
+          fi
 
     - name: Create VPC and Subnets
       uses: azure/cli@v1
       with:
         inlineScript: |
           # Create Resource Group
+          echo "Creating Resource Group..."
           az group create --name RenoPilotRG --location australiaeast
 
           # VNet with /16 CIDR block allowing up to 65,536 IP addresses
+          echo "Creating VNet..."
           az network vnet create \
             --name RenoPilotVPC \
             --resource-group RenoPilotRG \
@@ -73,6 +107,7 @@ jobs:
             --address-prefix 10.0.0.0/16
 
           # Public subnet with /24 CIDR block allowing up to 256 IP addresses
+          echo "Creating Public Subnet..."
           az network vnet subnet create \
             --name PublicSubnet \
             --vnet-name RenoPilotVPC \
@@ -80,6 +115,7 @@ jobs:
             --address-prefix 10.0.1.0/24
 
           # Private subnet for sensitive resources with /24 CIDR block
+          echo "Creating Private Subnet..."
           az network vnet subnet create \
             --name PrivateSubnet \
             --vnet-name RenoPilotVPC \
@@ -90,15 +126,16 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
+          echo "Creating Firewalls..."
           # Create Public Firewall
           az network firewall create \
-            --name PublicFirewall \
+            --name publicfirewall \
             --resource-group RenoPilotRG \
             --location australiaeast
 
           # Create Private Firewall
           az network firewall create \
-            --name PrivateFirewall \
+            --name privatefirewall \
             --resource-group RenoPilotRG \
             --location australiaeast
 
@@ -106,7 +143,7 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          ACR_NAME="RenoPilotRegistry"
+          ACR_NAME="renopilotregistry"
           # Premium SKU required for advanced features:
           # - Virtual Network support
           # - Enhanced throughput
@@ -144,28 +181,16 @@ jobs:
       uses: azure/aci-deploy@v1
       with:
         resource-group: RenoPilotRG
-        dns-name-label: renopilot-${{ github.run_number }}  # DNS label makes the container accessible via: renopilot-{run-number}.australiaeast.azurecontainer.io
-        image: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}  # Using SHA for immutable image versioning
+        dns-name-label: renopilot-${{ github.run_number }}
+        image: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
         registry-login-server: ${{ env.ACR_LOGIN_SERVER }}
         registry-username: ${{ env.ACR_USERNAME }}
         registry-password: ${{ env.ACR_PASSWORD }}
-        name: RenoPilotFenceAppInstance
+        name: renopilotfenceappinstance
         location: australiaeast
         vnet: RenoPilotVPC
         subnet: PublicSubnet
-        ports: 80 3838  # Expose both HTTP and Shiny ports
-
-    - name: Deploy Database
-      uses: azure/cli@v1
-      with:
-        inlineScript: |
-          # Create Azure SQL Server with secure admin credentials
-          az sql server create \
-            --name renopilot-fenceapp-db \
-            --resource-group RenoPilotRG \
-            --location australiaeast \
-            --admin-user dbadmin \
-            --admin-password ${{ secrets.DB_PASSWORD }}
+        ports: 80 3838
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
@@ -173,9 +198,9 @@ jobs:
         inlineScript: |
           # Allow SQL traffic (port 1433) only from public subnet to private subnet
           az network firewall network-rule create \
-            --collection-name SQLTraffic \
+            --collection-name sqltraffic \
             --destination-ports 1433 \
-            --firewall-name PrivateFirewall \
+            --firewall-name privatefirewall \
             --name SQLRule \
             --protocols TCP \
             --resource-group RenoPilotRG \
@@ -185,9 +210,9 @@ jobs:
 
           # Allow Docker registry traffic (port 5000) with wider access for image pulls
           az network firewall network-rule create \
-            --collection-name DockerTraffic \
+            --collection-name dockertraffic \
             --destination-ports 5000 \
-            --firewall-name PrivateFirewall \
+            --firewall-name privatefirewall \
             --name DockerRule \
             --protocols TCP \
             --resource-group RenoPilotRG \
