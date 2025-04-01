@@ -13,19 +13,23 @@ RUN apt-get update && apt-get install -y \
     libtiff5-dev \
     unixodbc \
     unixodbc-dev \
-    gnupg \
+    gnupg2 \
     curl \
+    apt-transport-https \
+    lsb-release \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Microsoft ODBC Driver for SQL Server (updated approach)
-RUN curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft-archive-keyring.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-archive-keyring.gpg] https://packages.microsoft.com/debian/11/prod bullseye main" > /etc/apt/sources.list.d/mssql-release.list \
+# Install Microsoft ODBC Driver for SQL Server (simpler approach)ist.d/mssql-release.list \
+RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
+    && curl https://packages.microsoft.com/config/debian/$(lsb_release -rs)/prod.list > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y msodbcsql18 \
-    && apt-get install -y unixodbc-dev \
+    && ACCEPT_EULA=Y apt-get install -y msodbcsql17 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Adjust ODBC configuration for SQL Server
+RUN echo "[ODBC Driver 17 for SQL Server]\nDescription=Microsoft ODBC Driver 17 for SQL Server\nDriver=/opt/microsoft/msodbcsql17/lib64/libmsodbcsql-17.*.so\nUsageCount=1\n" >> /etc/odbcinst.ini
 
 # Install R dependencies
 RUN R -e "install.packages(c('devtools', 'shiny', 'shinydashboard', 'dplyr', 'DT', 'shinytest2', 'uuid', 'odbc'), repos='http://cran.rstudio.com/')"
