@@ -191,31 +191,30 @@ jobs:
         vnet: RenoPilotVPC
         subnet: PublicSubnet
         ports: 80 3838
-
+        secure-environment-variables: DB_PASSWORD=${{ secrets.DB_PASSWORD }}ows.net DB_NAME=Shiny DB_USER=shiny DB_DRIVER="ODBC Driver 18 for SQL Server" DB_PORT=1433
+        secure-environment-variables: DB_PASSWORD=${{ secrets.DB_PASSWORD }}
     - name: Configure Network Security Rules
-      uses: azure/cli@v1
-      with:
+      uses: azure/cli@v1twork Security Rules
+      with: azure/cli@v1
         inlineScript: |
           # Allow SQL traffic (port 1433) only from public subnet to private subnet
-          az network firewall network-rule create \
-            --collection-name sqltraffic \
-            --destination-ports 1433 \
+          az network firewall network-rule create \ public subnet to private subnet
+            --collection-name sqltraffic \ create \
+            --destination-ports 1433 \ic \
             --firewall-name privatefirewall \
-            --name SQLRule \
+            --name SQLRule \privatefirewall \
             --protocols TCP \
             --resource-group RenoPilotRG \
             --source-addresses 10.0.1.0/24 \
             --destination-addresses 10.0.2.0/24 \
-            --action Allow
-
-          # Allow Docker registry traffic (port 5000) with wider access for image pulls
-          az network firewall network-rule create \
-            --collection-name dockertraffic \
-            --destination-ports 5000 \
-            --firewall-name privatefirewall \
-            --name DockerRule \
-            --protocols TCP \
+            --action Allowaddresses 10.0.2.0/24 \
+                        --action Allow
+          # Ensure Azure SQL Server allows connections from container subnet
+          echo "Configuring Azure SQL Server firewall rules..."0) with wider access for image pulls
+          SUBNET_ADDRESS_PREFIX=$(az network vnet subnet show --resource-group RenoPilotRG --vnet-name RenoPilotVPC --name PublicSubnet --query addressPrefix -o tsv)eate \
+          az sql server firewall-rule create \affic \
             --resource-group RenoPilotRG \
-            --source-addresses "*" \
-            --destination-addresses 10.0.2.0/24 \
-            --action Allow
+            --server shiny \vatefirewall \
+            --name "AllowContainerSubnet" \ \
+            --start-ip-address ${SUBNET_ADDRESS_PREFIX%/*} \
+            --end-ip-address 255.255.255.255otRG \
