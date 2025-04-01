@@ -206,7 +206,7 @@ jobs:
         registry-password: ${{ env.ACR_PASSWORD }}
         name: renopilotfenceappinstance
         location: australiaeast
-        vnet: RenoPilotVPC
+        vnet: renopilot-vpc
         subnet: PublicSubnet
         ports: 80 3838
         environment-variables: DOCKER_ENV=true DB_SERVER=shiny.database.windows.net DB_NAME=Shiny DB_USER=shiny DB_DRIVER="ODBC Driver 18 for SQL Server" DB_PORT=1433

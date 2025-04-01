@@ -42,11 +42,6 @@ jobs:
 
       - name: Define Environment Variables
         run: |
-          echo Driver="ODBC Driver 18 for SQL Server" >> ~/.Renviron
-          echo Database="Shiny" >> ~/.Renviron
-          echo UID="shiny" >> ~/.Renviron
-          echo PWD="${{ secrets.DB_PASSWORD }}" >> ~/.Renviron
-          echo Server="shiny.database.windows.net" >> ~/.Renviron
           echo Environment="Github" >> ~/.Renviron
         shell: bash
 

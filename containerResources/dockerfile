@@ -1,6 +1,6 @@
 FROM rocker/shiny:4.2.2
 
-# Install system dependencies
+# Install system dependencies (simplified - no ODBC)
 RUN apt-get update && apt-get install -y \
     libssl-dev \
     libcurl4-gnutls-dev \
@@ -11,28 +11,10 @@ RUN apt-get update && apt-get install -y \
     libharfbuzz-dev \
     libfribidi-dev \
     libtiff5-dev \
-    unixodbc \
-    unixodbc-dev \
-    gnupg2 \
-    curl \
-    apt-transport-https \
-    lsb-release \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Microsoft ODBC Driver for SQL Server (simpler approach)ist.d/mssql-release.list \
-RUN curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add - \
-    && curl https://packages.microsoft.com/config/debian/$(lsb_release -rs)/prod.list > /etc/apt/sources.list.d/mssql-release.list \
-    && apt-get update \
-    && ACCEPT_EULA=Y apt-get install -y msodbcsql17 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Adjust ODBC configuration for SQL Server
-RUN echo "[ODBC Driver 17 for SQL Server]\nDescription=Microsoft ODBC Driver 17 for SQL Server\nDriver=/opt/microsoft/msodbcsql17/lib64/libmsodbcsql-17.*.so\nUsageCount=1\n" >> /etc/odbcinst.ini
-
-# Install R dependencies
-RUN R -e "install.packages(c('devtools', 'shiny', 'shinydashboard', 'dplyr', 'DT', 'shinytest2', 'uuid', 'odbc'), repos='http://cran.rstudio.com/')"
+# Install R dependencies (removed odbc package)
+RUN R -e "install.packages(c('devtools', 'shiny', 'shinydashboard', 'dplyr', 'DT', 'shinytest2', 'uuid'), repos='http://cran.rstudio.com/')"
 
 # Install github dependencies
 RUN R -e "devtools::install_github('FlippieCoetser/Validate')"
@@ -40,16 +22,8 @@ RUN R -e "devtools::install_github('FlippieCoetser/Environment')"
 RUN R -e "devtools::install_github('FlippieCoetser/Query')"
 RUN R -e "devtools::install_github('FlippieCoetser/Storage')"
 
-# Set environment variables for database connection
-# These will be overridden when running the container
-ENV DB_DRIVER="ODBC Driver 18 for SQL Server" \
-    DB_SERVER="shiny.database.windows.net" \
-    DB_NAME="Shiny" \
-    DB_USER="shiny" \
-    DB_PASSWORD="" \
-    DB_PORT="1433" \
-    DB_DSN="Shiny" \
-    DOCKER_ENV="true"
+# Set environment variable to indicate Docker environment
+ENV DOCKER_ENV="true"
 
 # Copy shiny app into the directory /srv/shiny-server/
 COPY . /srv/shiny-server/
