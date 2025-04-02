@@ -103,70 +103,90 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Check if resource group exists
-          RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
+          # More aggressive cleanup of resources across all regions
+          echo "Searching for existing resources across all regions..."
           
-          if [ "$RG_EXISTS" = "true" ]; then
-            echo "Existing infrastructure found. Cleaning up in proper order..."
-            
-            # 1. Delete Web App first (they depend on other resources)
+          # 1. Delete Web App first (they depend on other resources)
+          echo "Checking for Web App in any region..."
+          if az webapp show --name renopilot-webapp --resource-group RenoPilotWebAppRG &>/dev/null; then
             echo "Deleting Web App..."
             az webapp delete --name renopilot-webapp --resource-group RenoPilotWebAppRG || true
-            
-            # 2. Delete App Service Plan if necessary
+            # Add delay to ensure deletion completes
+            sleep 30
+          fi
+          
+          # 2. Delete App Service Plan if necessary (in any region)
+          echo "Checking for App Service Plan in any region..."
+          if az appservice plan show --name renopilot-plan --resource-group RenoPilotWebAppRG &>/dev/null; then
             echo "Deleting App Service Plan..."
             az appservice plan delete --name renopilot-plan --resource-group RenoPilotWebAppRG --yes || true
-            
-            # 3. Delete ACR
-            echo "Deleting Azure Container Registry..."
-            az acr delete --name renopilotwebappreg --resource-group RenoPilotWebAppRG --yes || true
-            
-            # 4. Delete Firewalls
-            echo "Deleting Firewalls..."
-            az network firewall delete --name webapp-publicfw --resource-group RenoPilotWebAppRG || true
-            az network firewall delete --name webapp-privatefw --resource-group RenoPilotWebAppRG || true
-            
-            # 5. Delete VNet and subnets
-            echo "Deleting VNet and subnets..."
-            az network vnet delete --name renopilot-webapp-vpc --resource-group RenoPilotWebAppRG || true
-            
-            echo "Infrastructure cleanup complete."
-          else
-            echo "No existing infrastructure found. Proceeding with fresh deployment."
+            # Add delay to ensure deletion completes and quota is released
+            sleep 60
           fi
+          
+          # List all App Service Plans in the subscription to find potential conflicts
+          echo "Checking for other App Service Plans that might cause conflicts..."
+          APP_PLANS=$(az appservice plan list --query "[?contains(name, 'renopilot')].{name:name, resourceGroup:resourceGroup}" -o tsv)
+          if [ -n "$APP_PLANS" ]; then
+            echo "Found potentially conflicting App Service Plans:"
+            echo "$APP_PLANS"
+            echo "Attempting to clean up these plans..."
+            echo "$APP_PLANS" | while read -r name rg; do
+              if [ -n "$name" ] && [ -n "$rg" ]; then
+                echo "Deleting App Service Plan $name in resource group $rg..."
+                az appservice plan delete --name "$name" --resource-group "$rg" --yes || true
+              fi
+            done
+            # Add delay to ensure deletion completes
+            sleep 60
+          fi
+          
+          # 3. Delete ACR
+          echo "Deleting Azure Container Registry..."
+          az acr delete --name renopilotwebappreg --resource-group RenoPilotWebAppRG --yes || true
+          
+          # 4. Delete Firewalls
+          echo "Deleting Firewalls..."
+          az network firewall delete --name webapp-publicfw --resource-group RenoPilotWebAppRG || true
+          az network firewall delete --name webapp-privatefw --resource-group RenoPilotWebAppRG || true
+          
+          # 5. Delete VNet and subnets
+          echo "Deleting VNet and subnets..."
+          az network vnet delete --name renopilot-webapp-vpc --resource-group RenoPilotWebAppRG || true
+          
+          echo "Infrastructure cleanup complete. Sleeping to ensure all resources are properly released..."
+          sleep 30
 
     - name: Create VPC and Subnets
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Check if Resource Group exists and get its location
-          echo "Checking Resource Group..."
-          RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
-          
-          if [ "$RG_EXISTS" = "true" ]; then
-            echo "Resource Group already exists. Getting its location..."
-            LOCATION=$(az group show --name RenoPilotWebAppRG --query location -o tsv)
-            echo "Using existing resource group location: $LOCATION"
-          else
-            # Default location if creating new resource group
-            LOCATION="australiaeast"
-            echo "Creating Resource Group in $LOCATION..."
-            az group create --name RenoPilotWebAppRG --location $LOCATION
-          fi
+          # Explicitly use Australia Central for all resources
+          LOCATION="australiacentral"
+          echo "Using location: $LOCATION"
           
           # Store location for use in later steps
           echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
           
-          # Verify resource group was created
-          echo "Verifying Resource Group creation..."
+          # Check if Resource Group exists
+          RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
+          
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "Resource Group already exists."
+          else
+            echo "Creating Resource Group in $LOCATION..."
+            az group create --name RenoPilotWebAppRG --location $LOCATION
+          fi
+          
+          # Verify resource group exists
           if ! az group show --name RenoPilotWebAppRG &>/dev/null; then
-            echo "Error: Resource group RenoPilotWebAppRG was not created successfully."
+            echo "Error: Resource group RenoPilotWebAppRG was not found or created successfully."
             exit 1
           fi
           
-          # Add a short delay to ensure resource group is fully provisioned
+          # Add a delay to ensure resource group is fully provisioned
           echo "Waiting for resource group to be fully provisioned..."
-          sleep 10
+          sleep 15
           
           # VNet with /16 CIDR block allowing up to 65,536 IP addresses
           echo "Creating VNet..."
@@ -177,11 +197,13 @@ jobs:
             --address-prefix 10.1.0.0/16
           
           # Verify VNet was created
-          echo "Verifying VNet creation..."
           if ! az network vnet show --name renopilot-webapp-vpc --resource-group RenoPilotWebAppRG &>/dev/null; then
             echo "Error: VNet renopilot-webapp-vpc was not created successfully."
             exit 1
           fi
+          
+          # Add delay to ensure VNet is fully provisioned
+          sleep 10
           
           # Public subnet with /24 CIDR block allowing up to 256 IP addresses
           echo "Creating Public Subnet..."
@@ -192,6 +214,9 @@ jobs:
             --address-prefix 10.1.1.0/24 \
             --delegations Microsoft.Web/serverFarms \
             --service-endpoints Microsoft.Web
+          
+          # Add delay to ensure subnet is fully provisioned
+          sleep 10
           
           # Private subnet for sensitive resources with /24 CIDR block
           echo "Creating Private Subnet..."
@@ -290,24 +315,58 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Create a Basic tier App Service plan instead of Premium to avoid quota issues
-          az appservice plan create \
-            --name renopilot-plan \
-            --resource-group RenoPilotWebAppRG \
-            --is-linux \
-            --sku B1 \
-            --location ${{ env.AZURE_LOCATION }}
+          # Create a Basic tier App Service plan with retry logic
+          LOCATION="australiacentral"
+          MAX_RETRIES=3
+          
+          for ((i=1; i<=MAX_RETRIES; i++)); do
+            echo "Attempt $i of $MAX_RETRIES to create App Service Plan..."
+            
+            if az appservice plan create \
+              --name renopilot-plan \
+              --resource-group RenoPilotWebAppRG \
+              --is-linux \
+              --sku B1 \
+              --location $LOCATION; then
+              
+              echo "App Service Plan created successfully!"
+              break
+            else
+              echo "Failed to create App Service Plan. Waiting before retry..."
+              if [ $i -lt $MAX_RETRIES ]; then
+                # Exponential backoff - wait longer with each retry
+                SLEEP_TIME=$((30 * i))
+                echo "Waiting for $SLEEP_TIME seconds before next attempt..."
+                sleep $SLEEP_TIME
+              else
+                echo "Maximum retries reached. Could not create App Service Plan."
+                exit 1
+              fi
+            fi
+          done
+          
+          # Verify App Service Plan exists
+          if ! az appservice plan show --name renopilot-plan --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Error: App Service Plan renopilot-plan was not created successfully."
+            exit 1
+          fi
 
     - name: Create Web App
       uses: azure/cli@v1
       with:
         inlineScript: |
+          LOCATION="australiacentral"
+          
           # Create a web app that uses the container image
+          echo "Creating Web App..."
           az webapp create \
             --resource-group RenoPilotWebAppRG \
             --plan renopilot-plan \
             --name renopilot-webapp \
             --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+          
+          # Add delay to ensure webapp is created
+          sleep 15
           
           # Configure environment variables for the web app
           az webapp config appsettings set \
