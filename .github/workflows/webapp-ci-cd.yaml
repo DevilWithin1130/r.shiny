@@ -58,6 +58,43 @@ jobs:
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
         
+    - name: Register Required Resource Providers
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          echo "Registering Azure resource providers required for RenoPilot Web App infrastructure..."
+          # These Microsoft namespaces are required Azure services for RenoPilot application
+          # They cannot be renamed but are essential for our infrastructure
+          az provider register --namespace Microsoft.Web
+          az provider register --namespace Microsoft.ContainerRegistry
+          az provider register --namespace Microsoft.Network
+          
+          echo "Waiting for RenoPilot required Azure service registrations to complete..."
+          # Checking registration status for required providers
+          az provider show -n Microsoft.Web --query registrationState
+          az provider show -n Microsoft.ContainerRegistry --query registrationState
+          az provider show -n Microsoft.Network --query registrationState
+          
+          # Verify registrations with timeout
+          for provider in Microsoft.Web Microsoft.ContainerRegistry Microsoft.Network; do
+            state=$(az provider show -n $provider --query registrationState -o tsv)
+            echo "RenoPilot Azure dependency: $provider registration state: $state"
+            if [ "$state" != "Registered" ]; then
+              echo "Waiting for $provider to complete registration..."
+              for i in {1..12}; do
+                sleep 10
+                state=$(az provider show -n $provider --query registrationState -o tsv)
+                echo "$provider registration state: $state"
+                if [ "$state" == "Registered" ]; then
+                  break
+                fi
+                if [ $i -eq 12 ] && [ "$state" != "Registered" ]; then
+                  echo "Warning: $provider registration taking longer than expected. Continuing anyway."
+                fi
+              done
+            fi
+          done
+    
     - name: Check and Clean Existing Infrastructure
       uses: azure/cli@v1
       with:
