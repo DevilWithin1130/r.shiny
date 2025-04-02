@@ -109,6 +109,41 @@ jobs:
           if [ "$RG_EXISTS" = "true" ]; then
             echo "Resource Group exists. Beginning cleanup of existing resources..."
             
+            # 0. First do a specific cleanup of ACR to ensure it's properly removed
+            echo "Looking for all ACRs with renopilot prefix..."
+            ACR_LIST=$(az acr list --query "[?starts_with(name, 'renopilot')].name" -o tsv)
+            
+            if [ -n "$ACR_LIST" ]; then
+              for ACR in $ACR_LIST; do
+                echo "Found ACR: $ACR. Checking if it belongs to our RG..."
+                ACR_RG=$(az acr show --name $ACR --query resourceGroup -o tsv 2>/dev/null || echo "unknown")
+                
+                if [ "$ACR_RG" == "RenoPilotWebAppRG" ] || [ "$ACR_RG" == "unknown" ]; then
+                  echo "Attempting to delete ACR: $ACR"
+                  # Try multiple times with increased timeouts
+                  for i in {1..3}; do
+                    if az acr delete --name $ACR --resource-group RenoPilotWebAppRG --yes --output none 2>/dev/null; then
+                      echo "Successfully deleted ACR: $ACR"
+                      break
+                    else
+                      echo "Failed to delete ACR on attempt $i, waiting and retrying..."
+                      sleep 30
+                    fi
+                    
+                    if [ $i -eq 3 ]; then
+                      echo "Warning: Could not delete ACR: $ACR after multiple attempts. Continuing with other resources."
+                    fi
+                  done
+                fi
+              done
+              
+              # Wait for ACR deletions to complete
+              echo "Waiting for ACR deletions to propagate..."
+              sleep 60
+            else
+              echo "No ACRs with renopilot prefix found."
+            fi
+            
             # 1. Clean up Web Apps
             echo "Cleaning up Web Apps..."
             WEBAPPS=$(az webapp list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
@@ -490,20 +525,80 @@ jobs:
       with:
         inlineScript: |
           LOCATION="${{ env.AZURE_LOCATION }}"
-          # Use a unique ACR name that includes location (ACR names must be globally unique)
-          ACR_NAME="renopilot${LOCATION}reg"
+          TIMESTAMP="${{ env.TIMESTAMP }}"
+          RUNID="${{ github.run_id }}"
           
-          # Check if ACR already exists
-          if az acr show --name $ACR_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Container Registry '$ACR_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Container Registry '$ACR_NAME'..."
-            az acr create \
+          # Use a more unique ACR name that includes run ID to avoid conflicts
+          # ACR names must be between 5-50 characters, lowercase alphanumeric
+          # First try with location and run ID
+          ACR_BASE_NAME="renopilot"
+          ACR_NAME="${ACR_BASE_NAME}${LOCATION}${RUNID}"
+          
+          # Ensure the name is not too long (maximum 50 chars)
+          if [ ${#ACR_NAME} -gt 50 ]; then
+            # Truncate to fit the 50 character limit
+            ACR_NAME="${ACR_BASE_NAME}${RUNID}"
+            
+            # If still too long, use just timestamp (should be ~14 chars)
+            if [ ${#ACR_NAME} -gt 50 ]; then
+              ACR_NAME="${ACR_BASE_NAME}${TIMESTAMP}"
+            fi
+          fi
+          
+          # Convert to lowercase as ACR names must be lowercase
+          ACR_NAME=$(echo "$ACR_NAME" | tr '[:upper:]' '[:lower:]')
+          
+          echo "Using ACR name: $ACR_NAME"
+          
+          # Check if name is already in use globally in Azure
+          NAME_CHECK=$(az acr check-name --name "$ACR_NAME" --query nameAvailable -o tsv)
+          
+          # If name isn't available, try adding random suffix
+          if [ "$NAME_CHECK" != "true" ]; then
+            echo "ACR name $ACR_NAME is already taken. Generating alternative name..."
+            RANDOM_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 8)
+            ACR_NAME="${ACR_BASE_NAME}${RANDOM_SUFFIX}"
+            echo "Generated alternative ACR name: $ACR_NAME"
+            
+            # Double check the new name
+            NAME_CHECK=$(az acr check-name --name "$ACR_NAME" --query nameAvailable -o tsv)
+            if [ "$NAME_CHECK" != "true" ]; then
+              echo "Error: Still cannot find an available ACR name. Please check Azure portal."
+              exit 1
+            fi
+          fi
+          
+          # Create the registry with validated name
+          echo "Creating Container Registry '$ACR_NAME'..."
+          
+          # Use retry logic for ACR creation
+          MAX_RETRIES=3
+          SUCCESS=false
+          
+          for ((i=1; i<=MAX_RETRIES; i++)); do
+            echo "Attempt $i of $MAX_RETRIES to create ACR..."
+            if az acr create \
               --resource-group RenoPilotWebAppRG \
               --name $ACR_NAME \
               --sku Standard \
               --location $LOCATION \
-              --admin-enabled true
+              --admin-enabled true; then
+              
+              echo "ACR created successfully!"
+              SUCCESS=true
+              break
+            else
+              echo "Failed to create ACR on attempt $i."
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Waiting before retry..."
+                sleep 60
+              fi
+            fi
+          done
+          
+          if [ "$SUCCESS" != "true" ]; then
+            echo "ERROR: Failed to create ACR after $MAX_RETRIES attempts."
+            exit 1
           fi
           
           # Retrieve and store registry credentials securely in GitHub environment
@@ -523,23 +618,29 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          LOCATION="${{ env.AZURE_LOCATION }}"
-          ACR_NAME="renopilot${LOCATION}reg"
           IMAGE_TAG="${{ github.sha }}"
           IMAGE_NAME="renopilot-fenceapp"
+          
+          # Check if ACR exists before trying to query it
+          if ! az acr show --name ${{ env.ACR_NAME }} --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "ACR ${{ env.ACR_NAME }} does not exist. Setting IMAGE_EXISTS=false"
+            echo "IMAGE_EXISTS=false" >> $GITHUB_ENV
+            echo "exists=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           
           # Check if the image with the specific tag already exists in ACR
           echo "Checking if image $IMAGE_NAME:$IMAGE_TAG already exists in ACR..."
           
           # Using az acr repository show to check if image exists
-          if az acr repository show --name $ACR_NAME --image "$IMAGE_NAME:$IMAGE_TAG" &>/dev/null; then
+          if az acr repository show --name ${{ env.ACR_NAME }} --image "$IMAGE_NAME:$IMAGE_TAG" &>/dev/null; then
             echo "Image $IMAGE_NAME:$IMAGE_TAG already exists in ACR. Skipping build and push."
             echo "IMAGE_EXISTS=true" >> $GITHUB_ENV
-            echo "exists=true" >> $GITHUB_OUTPUT  # Updated to current GitHub Actions syntax
+            echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "Image $IMAGE_NAME:$IMAGE_TAG does not exist in ACR. Will build and push."
             echo "IMAGE_EXISTS=false" >> $GITHUB_ENV
-            echo "exists=false" >> $GITHUB_OUTPUT  # Updated to current GitHub Actions syntax
+            echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
     - name: Build and push image
