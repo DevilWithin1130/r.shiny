@@ -224,16 +224,16 @@ jobs:
             echo "Resource Group does not exist. No cleanup needed."
           fi
 
-          # Set Australian regions to use
-          REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
-          echo "Will only create resources in Australian regions: ${REGIONS[*]}"
+          # Set Australian and Asian regions to use
+          REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2" "eastasia" "southeastasia")
+          echo "Will create resources in Australian or Asian regions: ${REGIONS[*]}"
     
     - name: Check Existing Infrastructure
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Try a list of regions in order of preference - only Australian regions
-          REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
+          # Try a list of regions in order of preference - Australian and Asian regions
+          REGIONS=("australiaeast" "australiasoutheast" "eastasia" "southeastasia" "australiacentral" "australiacentral2")
           LOCATION=""
           
           # Check if Resource Group exists
@@ -254,58 +254,102 @@ jobs:
             else
               echo "Resource Group exists but no App Service Plan found. Searching for available region..."
               # Continue with region search as no existing App Service Plans found
+              
+              # Try each region with different SKUs
+              SKUS=("F1" "B1" "S1" "P1v2")
+              
+              # Try Australian and Asian regions
+              echo "Checking Australian and Asian regions..."
               for region in "${REGIONS[@]}"; do
-                echo "Checking quota for region: $region"
-                if az appservice plan create \
-                  --name "temp-quota-check" \
-                  --resource-group RenoPilotWebAppRG \
-                  --is-linux \
-                  --sku F1 \
-                  --location $region &>/dev/null; then
+                for SKU in "${SKUS[@]}"; do
+                  echo "Checking quota for region $region with SKU $SKU..."
                   
-                  echo "Found region with quota: $region"
-                  LOCATION=$region
+                  # Capture detailed error output
+                  ERROR_OUTPUT=$(az appservice plan create \
+                    --name "temp-quota-check-$SKU" \
+                    --resource-group RenoPilotWebAppRG \
+                    --is-linux \
+                    --sku $SKU \
+                    --location $region 2>&1)
                   
-                  # Clean up the temporary plan
-                  az appservice plan delete --name "temp-quota-check" --resource-group RenoPilotWebAppRG --yes
-                  break
-                else
-                  echo "Region $region has insufficient quota or other issues."
-                fi
+                  if [ $? -eq 0 ]; then
+                    echo "Found region with quota: $region for SKU: $SKU"
+                    LOCATION=$region
+                    SELECTED_SKU=$SKU
+                    
+                    # Clean up the temporary plan
+                    echo "Cleaning up temporary app service plan..."
+                    az appservice plan delete --name "temp-quota-check-$SKU" --resource-group RenoPilotWebAppRG --yes
+                    
+                    # Store selected SKU
+                    echo "APP_SKU=$SELECTED_SKU" >> $GITHUB_ENV
+                    break 2
+                  else
+                    echo "Region $region with SKU $SKU has issues. Error details:"
+                    echo "$ERROR_OUTPUT"
+                  fi
+                done
               done
             fi
           else
             echo "Resource Group does not exist. Will create in an available region."
-            # Continue with region search as no resource group exists
+            # Create resource group in a region where quota is available
+            
+            # Try each region with different SKUs
+            SKUS=("F1" "B1" "S1" "P1v2")
+            
+            # Try Australian and Asian regions
+            echo "Checking Australian and Asian regions..."
             for region in "${REGIONS[@]}"; do
-              echo "Checking quota for region: $region"
-              
               # Create resource group temporarily for testing
+              echo "Creating temporary resource group in $region..."
               az group create --name RenoPilotWebAppRG --location $region
               
-              if az appservice plan create \
-                --name "temp-quota-check" \
-                --resource-group RenoPilotWebAppRG \
-                --is-linux \
-                --sku F1 \
-                --location $region &>/dev/null; then
+              for SKU in "${SKUS[@]}"; do
+                echo "Checking quota for region $region with SKU $SKU..."
                 
-                echo "Found region with quota: $region"
-                LOCATION=$region
+                # Capture detailed error output
+                ERROR_OUTPUT=$(az appservice plan create \
+                  --name "temp-quota-check-$SKU" \
+                  --resource-group RenoPilotWebAppRG \
+                  --is-linux \
+                  --sku $SKU \
+                  --location $region 2>&1)
                 
-                # Clean up the temporary plan
-                az appservice plan delete --name "temp-quota-check" --resource-group RenoPilotWebAppRG --yes
-                break
-              else
-                echo "Region $region has insufficient quota or other issues."
-              fi
+                if [ $? -eq 0 ]; then
+                  echo "Found region with quota: $region for SKU: $SKU"
+                  LOCATION=$region
+                  SELECTED_SKU=$SKU
+                  
+                  # Clean up the temporary plan
+                  echo "Cleaning up temporary app service plan..."
+                  az appservice plan delete --name "temp-quota-check-$SKU" --resource-group RenoPilotWebAppRG --yes
+                  
+                  # Store selected SKU
+                  echo "APP_SKU=$SELECTED_SKU" >> $GITHUB_ENV
+                  break 2
+                else
+                  echo "Region $region with SKU $SKU has issues. Error details:"
+                  echo "$ERROR_OUTPUT"
+                fi
+              done
             done
           fi
           
           # If no region with quota was found
           if [ -z "$LOCATION" ]; then
-            echo "ERROR: Could not find any region with available App Service Plan quota."
+            echo "ERROR: Could not find any Australian or Asian region with available App Service Plan quota."
             echo "Please request a quota increase through the Azure portal or contact Azure support."
+            echo "Alternatively, check the subscription limits and make sure the service principal has appropriate permissions."
+            
+            # Print subscription information for debugging
+            echo "Subscription information:"
+            az account show
+            
+            # List all regions and their status
+            echo "Available regions for subscription:"
+            az account list-locations --query "[].{name:name, displayName:displayName, regionType:regionType, physicalLocation:metadata.physicalLocation}" -o table
+            
             exit 1
           fi
           
@@ -317,12 +361,6 @@ jobs:
           # Generate a timestamp for unique resource names
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
-          
-          # Check if Resource Group exists
-          if [ "$RG_EXISTS" = "false" ]; then
-            echo "Creating Resource Group in $LOCATION..."
-            az group create --name RenoPilotWebAppRG --location $LOCATION
-          fi
 
     - name: Create VPC and Subnets
       uses: azure/cli@v1
@@ -603,15 +641,23 @@ jobs:
           # Create App Service Plan with region-specific name
           LOCATION="${{ env.AZURE_LOCATION }}"
           APP_PLAN_NAME="renopilot-plan-$LOCATION"
+          # Use the SKU we already confirmed works
+          SKU="${{ env.APP_SKU }}"
           
           # Check if App Service Plan already exists
           if az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
             echo "App Service Plan '$APP_PLAN_NAME' already exists. Skipping creation."
           else
-            echo "Creating App Service Plan '$APP_PLAN_NAME'..."
+            echo "Creating App Service Plan '$APP_PLAN_NAME' with SKU $SKU..."
             
-            # Try different SKUs if facing quota issues
-            SKUS=("B1" "S1" "P1v2" "F1")
+            # If we don't have a working SKU from previous step, try different ones
+            if [ -z "$SKU" ]; then
+              SKUS=("B1" "S1" "P1v2" "F1")
+            else
+              # Only try the SKU we found that works
+              SKUS=("$SKU")
+            fi
+            
             MAX_RETRIES=3
             
             # First try with different SKUs
@@ -621,20 +667,24 @@ jobs:
               for ((i=1; i<=MAX_RETRIES; i++)); do
                 echo "Attempt $i of $MAX_RETRIES to create App Service Plan with SKU $SKU..."
                 
-                if az appservice plan create \
+                # Capture detailed error output
+                ERROR_OUTPUT=$(az appservice plan create \
                   --name $APP_PLAN_NAME \
                   --resource-group RenoPilotWebAppRG \
                   --is-linux \
                   --sku $SKU \
-                  --location $LOCATION; then
-                  
+                  --location $LOCATION 2>&1)
+                
+                if [ $? -eq 0 ]; then
                   echo "App Service Plan created successfully with SKU $SKU!"
                   echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
                   echo "APP_SKU=$SKU" >> $GITHUB_ENV
                   echo "APP_PLAN_SUCCESS=true" >> $GITHUB_ENV
                   break 2  # Break out of both loops
                 else
-                  echo "Failed to create App Service Plan with SKU $SKU. Waiting before retry..."
+                  echo "Failed to create App Service Plan with SKU $SKU."
+                  echo "Error details:"
+                  echo "$ERROR_OUTPUT"
                   if [ $i -lt $MAX_RETRIES ]; then
                     # Exponential backoff - wait longer with each retry
                     SLEEP_TIME=$((20 * i))
