@@ -98,6 +98,102 @@ jobs:
               done
             fi
           done
+
+    - name: Clean Up Existing Infrastructure
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Check if Resource Group exists
+          RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
+          
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "Resource Group exists. Beginning cleanup of existing resources..."
+            
+            # 1. Clean up Web Apps
+            echo "Cleaning up Web Apps..."
+            WEBAPPS=$(az webapp list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
+            if [ -n "$WEBAPPS" ]; then
+              for WEBAPP in $WEBAPPS; do
+                echo "Deleting Web App: $WEBAPP"
+                az webapp delete --name $WEBAPP --resource-group RenoPilotWebAppRG --keep-empty-plan
+              done
+              # Wait for webapp deletion to complete
+              sleep 30
+            else
+              echo "No Web Apps found to clean up."
+            fi
+            
+            # 2. Clean up App Service Plans
+            echo "Cleaning up App Service Plans..."
+            APP_PLANS=$(az appservice plan list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
+            if [ -n "$APP_PLANS" ]; then
+              for PLAN in $APP_PLANS; do
+                echo "Deleting App Service Plan: $PLAN"
+                az appservice plan delete --name $PLAN --resource-group RenoPilotWebAppRG --yes
+              done
+              # Wait for app plan deletion to complete
+              sleep 30
+            else
+              echo "No App Service Plans found to clean up."
+            fi
+            
+            # 3. Clean up Network Security Groups
+            echo "Cleaning up Network Security Groups..."
+            NSGS=$(az network nsg list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
+            if [ -n "$NSGS" ]; then
+              for NSG in $NSGS; do
+                echo "Deleting NSG: $NSG"
+                az network nsg delete --name $NSG --resource-group RenoPilotWebAppRG
+              done
+              # Wait for NSG deletion to complete
+              sleep 15
+            else
+              echo "No NSGs found to clean up."
+            fi
+            
+            # 4. Clean up Firewalls
+            echo "Cleaning up Firewalls..."
+            FIREWALLS=$(az network firewall list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
+            if [ -n "$FIREWALLS" ]; then
+              for FIREWALL in $FIREWALLS; do
+                echo "Deleting Firewall: $FIREWALL"
+                az network firewall delete --name $FIREWALL --resource-group RenoPilotWebAppRG
+              done
+              # Wait for firewall deletion to complete
+              sleep 30
+            else
+              echo "No Firewalls found to clean up."
+            fi
+            
+            # 5. Clean up Subnets (required before VNet cleanup)
+            echo "Cleaning up VNets and Subnets..."
+            VNETS=$(az network vnet list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
+            if [ -n "$VNETS" ]; then
+              for VNET in $VNETS; do
+                # Get subnets in this VNet
+                SUBNETS=$(az network vnet subnet list --resource-group RenoPilotWebAppRG --vnet-name $VNET --query "[].name" -o tsv)
+                for SUBNET in $SUBNETS; do
+                  echo "Deleting Subnet: $SUBNET in VNet: $VNET"
+                  az network vnet subnet delete --name $SUBNET --vnet-name $VNET --resource-group RenoPilotWebAppRG
+                done
+                # Delete VNet after subnets
+                echo "Deleting VNet: $VNET"
+                az network vnet delete --name $VNET --resource-group RenoPilotWebAppRG
+              done
+              # Wait for VNet deletion to complete
+              sleep 30
+            else
+              echo "No VNets found to clean up."
+            fi
+            
+            echo "Clean-up completed."
+          else
+            echo "Resource Group does not exist. No cleanup needed."
+          fi
+
+          # Set Australian regions to use
+          REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
+          echo "Will only create resources in Australian regions: ${REGIONS[*]}"
     
     - name: Check Existing Infrastructure
       uses: azure/cli@v1
@@ -319,7 +415,7 @@ jobs:
           
           # Store NSG name for later steps
           echo "NSG_NAME=$NSG_NAME" >> $GITHUB_ENV
-            
+          
           # Apply NSG to the subnet
           echo "Applying NSG to subnet..."
           az network vnet subnet update \
@@ -544,8 +640,7 @@ jobs:
               --plan ${{ env.APP_PLAN_NAME }} \
               --name $WEBAPP_NAME \
               --deployment-container-image-name nginx \
-              --runtime "DOCKER|nginx" 
-            
+              --runtime "DOCKER|nginx"
             echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
             
             # Add delay to ensure webapp is created
@@ -579,7 +674,7 @@ jobs:
               --resource-group RenoPilotWebAppRG \
               --vnet ${{ env.VNET_NAME }} \
               --subnet ${{ env.PUBLIC_SUBNET_NAME }}
-
+            
             # Allow the web app to be accessible from anywhere
             az webapp config access-restriction remove \
               --name $WEBAPP_NAME \
@@ -598,10 +693,43 @@ jobs:
     
     - name: Deploy to Azure Web App
       uses: azure/webapps-deploy@v2
+      id: deploy
       with:
         app-name: ${{ env.WEBAPP_NAME }}
         images: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
         slot-name: 'production'
+        
+    - name: Verify Deployment Success
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Verify deployment status
+          echo "Verifying deployment status..."
+          DEPLOYMENT_STATUS=$(az webapp deployment container show --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG --query properties.status -o tsv 2>/dev/null || echo "Unknown")
+          
+          if [[ "$DEPLOYMENT_STATUS" == "Success" ]]; then
+            echo "Deployment completed successfully!"
+          else
+            echo "Checking container readiness..."
+            # Wait for up to 5 minutes for the container to become ready
+            for i in {1..10}; do
+              CONTAINER_STATUS=$(az webapp show --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG --query state -o tsv 2>/dev/null || echo "Unknown")
+              if [[ "$CONTAINER_STATUS" == "Running" ]]; then
+                echo "Container is now running!"
+                break
+              fi
+              echo "Container status: $CONTAINER_STATUS. Waiting 30 seconds..."
+              sleep 30
+            done
+          fi
+          
+          # Display the web app URL with proper protocol
+          WEBAPP_URL=$(az webapp show --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG --query "defaultHostName" -o tsv)
+          echo "Web app deployed at: https://$WEBAPP_URL"
+          echo "Shiny app should be accessible at: https://$WEBAPP_URL"
+          
+          # Add a message to make the URL clickable in GitHub Actions log
+          echo "::notice::Web app deployed at https://$WEBAPP_URL"
 
     - name: Configure Container Settings
       uses: azure/cli@v1
@@ -697,7 +825,7 @@ jobs:
           
           # Check if Shiny rule collection already exists
           if ! az network firewall network-rule collection show --name shinytraffic --firewall-name ${{ env.PUBLIC_FW_NAME }} --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Creating Shiny rule collection..."  
+            echo "Creating Shiny rule collection..."
             az network firewall network-rule create \
               --collection-name shinytraffic \
               --name ShinyRule \

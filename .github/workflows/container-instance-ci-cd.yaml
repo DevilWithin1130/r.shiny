@@ -91,6 +91,104 @@ jobs:
             fi
           done
     
+    - name: Clean Up Existing Infrastructure
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Check if Resource Group exists
+          RG_EXISTS=$(az group exists --name RenoPilotContainerRG)
+          
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "Resource Group exists. Beginning cleanup of existing resources..."
+            
+            # 1. Clean up Container Instances
+            echo "Cleaning up Container Instances..."
+            CONTAINER_INSTANCES=$(az container list --resource-group RenoPilotContainerRG --query "[].name" -o tsv)
+            if [ -n "$CONTAINER_INSTANCES" ]; then
+              for CONTAINER in $CONTAINER_INSTANCES; do
+                echo "Deleting Container Instance: $CONTAINER"
+                az container delete --name $CONTAINER --resource-group RenoPilotContainerRG --yes
+              done
+              # Wait for container deletion to complete
+              sleep 30
+            else
+              echo "No Container Instances found to clean up."
+            fi
+            
+            # 2. Clean up Network Security Groups
+            echo "Cleaning up Network Security Groups..."
+            NSGS=$(az network nsg list --resource-group RenoPilotContainerRG --query "[].name" -o tsv)
+            if [ -n "$NSGS" ]; then
+              for NSG in $NSGS; do
+                echo "Deleting NSG: $NSG"
+                az network nsg delete --name $NSG --resource-group RenoPilotContainerRG
+              done
+              # Wait for NSG deletion to complete
+              sleep 15
+            else
+              echo "No NSGs found to clean up."
+            fi
+            
+            # 3. Clean up Firewalls
+            echo "Cleaning up Firewalls..."
+            FIREWALLS=$(az network firewall list --resource-group RenoPilotContainerRG --query "[].name" -o tsv)
+            if [ -n "$FIREWALLS" ]; then
+              for FIREWALL in $FIREWALLS; do
+                echo "Deleting Firewall: $FIREWALL"
+                az network firewall delete --name $FIREWALL --resource-group RenoPilotContainerRG
+              done
+              # Wait for firewall deletion to complete
+              sleep 30
+            else
+              echo "No Firewalls found to clean up."
+            fi
+            
+            # 4. Clean up Subnets (required before VNet cleanup)
+            echo "Cleaning up VNets and Subnets..."
+            VNETS=$(az network vnet list --resource-group RenoPilotContainerRG --query "[].name" -o tsv)
+            if [ -n "$VNETS" ]; then
+              for VNET in $VNETS; do
+                # Get subnets in this VNet
+                SUBNETS=$(az network vnet subnet list --resource-group RenoPilotContainerRG --vnet-name $VNET --query "[].name" -o tsv)
+                for SUBNET in $SUBNETS; do
+                  echo "Deleting Subnet: $SUBNET in VNet: $VNET"
+                  az network vnet subnet delete --name $SUBNET --vnet-name $VNET --resource-group RenoPilotContainerRG
+                done
+                # Delete VNet after subnets
+                echo "Deleting VNet: $VNET"
+                az network vnet delete --name $VNET --resource-group RenoPilotContainerRG
+              done
+              # Wait for VNet deletion to complete
+              sleep 30
+            else
+              echo "No VNets found to clean up."
+            fi
+            
+            # 5. Clean up Container Registry (keep images if useful)
+            # Only clean up ACR if absolutely necessary, as it contains built images
+            # If you want to clean up ACR, uncomment these lines:
+            # echo "Cleaning up Container Registry..."
+            # ACR_LIST=$(az acr list --resource-group RenoPilotContainerRG --query "[].name" -o tsv)
+            # if [ -n "$ACR_LIST" ]; then
+            #   for ACR in $ACR_LIST; do
+            #     echo "Deleting Container Registry: $ACR"
+            #     az acr delete --name $ACR --resource-group RenoPilotContainerRG --yes
+            #   done
+            #   # Wait for ACR deletion to complete
+            #   sleep 30
+            # else
+            #   echo "No Container Registries found to clean up."
+            # fi
+            
+            echo "Clean-up completed."
+          else
+            echo "Resource Group does not exist. No cleanup needed."
+          fi
+
+          # Set Australian regions to use
+          REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
+          echo "Will only create resources in Australian regions: ${REGIONS[*]}"
+        
     - name: Check Existing Infrastructure
       uses: azure/cli@v1
       with:
