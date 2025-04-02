@@ -234,7 +234,9 @@ jobs:
         inlineScript: |
           # Try a list of regions in order of preference - Australian and Asian regions
           REGIONS=("australiaeast" "australiasoutheast" "eastasia" "southeastasia" "australiacentral" "australiacentral2")
-          LOCATION=""
+          
+          # Default to australiaeast as our anchor region
+          LOCATION="australiaeast"
           
           # Check if Resource Group exists
           RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
@@ -251,79 +253,28 @@ jobs:
               # Use the location of the first plan found
               LOCATION=$(echo $EXISTING_PLANS | jq -r '.[0].location')
               echo "Using existing resources in location: $LOCATION"
+              
+              # Try to determine the SKU from existing plan
+              EXISTING_SKU=$(az appservice plan show --name $(echo $EXISTING_PLANS | jq -r '.[0].name') --resource-group RenoPilotWebAppRG --query sku.name -o tsv)
+              if [ -n "$EXISTING_SKU" ]; then
+                echo "Using existing SKU: $EXISTING_SKU"
+                echo "APP_SKU=$EXISTING_SKU" >> $GITHUB_ENV
+              else
+                echo "Using default SKU: B1"
+                echo "APP_SKU=B1" >> $GITHUB_ENV
+              fi
             else
-              echo "Resource Group exists but no App Service Plan found. Searching for available region..."
+              echo "Resource Group exists but no App Service Plans found."
+              echo "Using default location: $LOCATION and SKU: B1"
+              echo "APP_SKU=B1" >> $GITHUB_ENV
               
-              # Add a default location as a fallback
-              echo "Setting a default fallback location to ensure we can continue..."
-              LOCATION="australiaeast"
-              echo "Default location set to: $LOCATION"
-              
-              # Try each region with different SKUs
-              SKUS=("F1" "B1" "S1" "P1v2")
-              
-              # Try Australian and Asian regions but with timeout protection
-              echo "Checking Australian and Asian regions..."
-              for region in "${REGIONS[@]}"; do
-                for SKU in "${SKUS[@]}"; do
-                  echo "Checking quota for region $region with SKU $SKU..."
-                  
-                  # Use timeout command to prevent hanging
-                  timeout 60s bash -c "
-                    # Capture detailed error output
-                    ERROR_OUTPUT=\$(az appservice plan create \\
-                      --name \"temp-quota-check-$SKU\" \\
-                      --resource-group RenoPilotWebAppRG \\
-                      --is-linux \\
-                      --sku $SKU \\
-                      --location $region 2>&1)
-                    
-                    if [ \$? -eq 0 ]; then
-                      echo \"Found region with quota: $region for SKU: $SKU\"
-                      echo \"APP_SKU=$SKU\" >> \$GITHUB_ENV
-                      exit 42  # Special exit code to indicate success
-                    else
-                      echo \"Region $region with SKU $SKU has issues:\"
-                      echo \"\$ERROR_OUTPUT\"
-                      exit 1
-                    fi
-                  "
-                  
-                  # Check the exit code from the timeout command
-                  TIMEOUT_EXIT=$?
-                  if [ $TIMEOUT_EXIT -eq 42 ]; then
-                    # Success case - region and SKU work
-                    LOCATION=$region
-                    SELECTED_SKU=$SKU
-                    
-                    # Clean up the temporary plan
-                    echo "Cleaning up temporary app service plan..."
-                    az appservice plan delete --name "temp-quota-check-$SKU" --resource-group RenoPilotWebAppRG --yes
-                    
-                    # Store selected SKU
-                    echo "APP_SKU=$SELECTED_SKU" >> $GITHUB_ENV
-                    break 2
-                  elif [ $TIMEOUT_EXIT -eq 124 ]; then
-                    # Timeout occurred
-                    echo "Timeout while checking $region with SKU $SKU - operation took too long"
-                  else
-                    # Command failed normally
-                    echo "Region $region with SKU $SKU unavailable. Trying next option..."
-                  fi
-                  
-                  # Add delay between attempts to avoid throttling
-                  sleep 5
-                done
-              done
-              
-              # Even if all quota checks fail, we'll use the default location set above
-              echo "Using location: $LOCATION (may be the default if no quota checks succeeded)"
+              # We'll avoid quota checks to prevent throttling
+              echo "Skipping quota checks due to previous API throttling. Using default values."
             fi
           else
-            echo "Resource Group does not exist. Creating in default location australiaeast..."
-            # Simply create in a default location rather than testing all
-            LOCATION="australiaeast"
+            echo "Resource Group does not exist. Creating in default location $LOCATION..."
             az group create --name RenoPilotWebAppRG --location $LOCATION
+            echo "APP_SKU=B1" >> $GITHUB_ENV
           fi
           
           echo "Final selected location: $LOCATION"
@@ -614,7 +565,7 @@ jobs:
           # Create App Service Plan with region-specific name
           LOCATION="${{ env.AZURE_LOCATION }}"
           APP_PLAN_NAME="renopilot-plan-$LOCATION"
-          # Use the SKU we already confirmed works
+          # Use the SKU we set (defaulting to B1)
           SKU="${{ env.APP_SKU }}"
           
           # Check if App Service Plan already exists
@@ -623,61 +574,76 @@ jobs:
           else
             echo "Creating App Service Plan '$APP_PLAN_NAME' with SKU $SKU..."
             
-            # If we don't have a working SKU from previous step, try different ones
-            if [ -z "$SKU" ]; then
-              SKUS=("B1" "S1" "P1v2" "F1")
-            else
-              # Only try the SKU we found that works
-              SKUS=("$SKU")
-            fi
+            # Implement exponential backoff for the app service plan creation
+            MAX_RETRIES=5
+            RETRY_DELAY=30
+            SUCCESS=false
             
-            MAX_RETRIES=3
-            
-            # First try with different SKUs
-            for SKU in "${SKUS[@]}"; do
-              echo "Attempting to create App Service Plan with SKU: $SKU"
+            for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+              echo "Attempt $attempt of $MAX_RETRIES to create App Service Plan..."
               
-              for ((i=1; i<=MAX_RETRIES; i++)); do
-                echo "Attempt $i of $MAX_RETRIES to create App Service Plan with SKU $SKU..."
+              # Capture detailed error output
+              if ERROR_OUTPUT=$(az appservice plan create \
+                --name $APP_PLAN_NAME \
+                --resource-group RenoPilotWebAppRG \
+                --is-linux \
+                --sku $SKU \
+                --location $LOCATION 2>&1); then
                 
-                # Capture detailed error output
-                ERROR_OUTPUT=$(az appservice plan create \
-                  --name $APP_PLAN_NAME \
-                  --resource-group RenoPilotWebAppRG \
-                  --is-linux \
-                  --sku $SKU \
-                  --location $LOCATION 2>&1)
+                echo "App Service Plan created successfully with SKU $SKU!"
+                SUCCESS=true
+                break
+              else
+                echo "Failed to create App Service Plan with SKU $SKU."
+                echo "Error details:"
+                echo "$ERROR_OUTPUT"
                 
-                if [ $? -eq 0 ]; then
-                  echo "App Service Plan created successfully with SKU $SKU!"
-                  echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
-                  echo "APP_SKU=$SKU" >> $GITHUB_ENV
-                  echo "APP_PLAN_SUCCESS=true" >> $GITHUB_ENV
-                  break 2  # Break out of both loops
-                else
-                  echo "Failed to create App Service Plan with SKU $SKU."
-                  echo "Error details:"
-                  echo "$ERROR_OUTPUT"
-                  if [ $i -lt $MAX_RETRIES ]; then
-                    # Exponential backoff - wait longer with each retry
-                    SLEEP_TIME=$((20 * i))
-                    echo "Waiting for $SLEEP_TIME seconds before next attempt..."
-                    sleep $SLEEP_TIME
+                if [[ "$ERROR_OUTPUT" == *"throttled"* ]]; then
+                  echo "Detected API throttling. Waiting longer before retry..."
+                  RETRY_DELAY=$((RETRY_DELAY * 2))
+                fi
+                
+                if [ $attempt -lt $MAX_RETRIES ]; then
+                  echo "Waiting for $RETRY_DELAY seconds before next attempt..."
+                  sleep $RETRY_DELAY
+                fi
+              fi
+            done
+            
+            if [ "$SUCCESS" = "false" ]; then
+              echo "WARNING: Failed to create App Service Plan after $MAX_RETRIES attempts."
+              echo "Attempting to create with a different SKU as a last resort..."
+              
+              # Try one more time with a different SKU
+              for FALLBACK_SKU in "S1" "B2" "P1v2"; do
+                if [ "$FALLBACK_SKU" != "$SKU" ]; then
+                  echo "Trying with fallback SKU: $FALLBACK_SKU"
+                  if az appservice plan create \
+                    --name $APP_PLAN_NAME \
+                    --resource-group RenoPilotWebAppRG \
+                    --is-linux \
+                    --sku $FALLBACK_SKU \
+                    --location $LOCATION; then
+                    
+                    echo "App Service Plan created successfully with fallback SKU $FALLBACK_SKU!"
+                    SKU=$FALLBACK_SKU
+                    SUCCESS=true
+                    break
                   fi
                 fi
               done
-            done
-            
-            # Check if we succeeded with any SKU
-            if ! az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-              echo "ERROR: All attempts to create App Service Plan failed."
-              echo "Please check your Azure subscription quota limits and try again."
-              exit 1
+              
+              if [ "$SUCCESS" = "false" ]; then
+                echo "ERROR: All attempts to create App Service Plan failed."
+                echo "Please check your Azure subscription quota limits and try again."
+                exit 1
+              fi
             fi
           fi
           
-          # Store App Service Plan name for later steps
+          # Store App Service Plan name and SKU for later steps
           echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+          echo "APP_SKU=$SKU" >> $GITHUB_ENV
 
     - name: Create Web App and Configure
       uses: azure/cli@v1
