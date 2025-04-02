@@ -137,7 +137,22 @@ jobs:
               echo "No App Service Plans found to clean up."
             fi
             
-            # 3. Clean up Network Security Groups
+            # 3. First remove NSG associations from subnets
+            echo "Removing NSG associations from subnets..."
+            VNETS=$(az network vnet list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
+            if [ -n "$VNETS" ]; then
+              for VNET in $VNETS; do
+                SUBNETS=$(az network vnet subnet list --resource-group RenoPilotWebAppRG --vnet-name $VNET --query "[].name" -o tsv)
+                for SUBNET in $SUBNETS; do
+                  echo "Removing NSG association from subnet: $SUBNET in VNet: $VNET"
+                  az network vnet subnet update --resource-group RenoPilotWebAppRG --vnet-name $VNET --name $SUBNET --network-security-group "" --route-table ""
+                done
+              done
+              # Wait for association removal to complete
+              sleep 15
+            fi
+            
+            # 4. Now clean up Network Security Groups
             echo "Cleaning up Network Security Groups..."
             NSGS=$(az network nsg list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
             if [ -n "$NSGS" ]; then
@@ -151,7 +166,7 @@ jobs:
               echo "No NSGs found to clean up."
             fi
             
-            # 4. Clean up Firewalls
+            # 5. Clean up Firewalls
             echo "Cleaning up Firewalls..."
             FIREWALLS=$(az network firewall list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
             if [ -n "$FIREWALLS" ]; then
@@ -165,7 +180,7 @@ jobs:
               echo "No Firewalls found to clean up."
             fi
             
-            # 5. Clean up Subnets (required before VNet cleanup)
+            # 6. Clean up Subnets (required before VNet cleanup)
             echo "Cleaning up VNets and Subnets..."
             VNETS=$(az network vnet list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
             if [ -n "$VNETS" ]; then
@@ -607,21 +622,6 @@ jobs:
                     SLEEP_TIME=$((20 * i))
                     echo "Waiting for $SLEEP_TIME seconds before next attempt..."
                     sleep $SLEEP_TIME
-                  fi
-                fi
-              done
-            done
-            
-            # Check if we succeeded with any SKU
-            if ! az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-              echo "ERROR: All attempts to create App Service Plan failed."
-              echo "Please check your Azure subscription quota limits and try again."
-              exit 1
-            fi
-          fi
-
-    - name: Create Web App and Configure
-      uses: azure/cli@v1
       with:
         inlineScript: |
           LOCATION="${{ env.AZURE_LOCATION }}"
