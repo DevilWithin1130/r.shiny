@@ -136,7 +136,7 @@ jobs:
                   LOCATION=$region
                   
                   # Clean up the temporary container
-                  az container delete --name "temp-quota-check" --resource-group RenoPilotContainerRG --yes --no-wait
+                  az container delete --name "temp-quota-check" --resource-group RenoPilotContainerRG --yes
                   break
                 else
                   echo "Region $region has insufficient quota or other issues."
@@ -168,7 +168,7 @@ jobs:
                 LOCATION=$region
                 
                 # Clean up the temporary container
-                az container delete --name "temp-quota-check" --resource-group RenoPilotContainerRG --yes --no-wait
+                az container delete --name "temp-quota-check" --resource-group RenoPilotContainerRG --yes
                 break
               else
                 echo "Region $region has insufficient quota or other issues."
