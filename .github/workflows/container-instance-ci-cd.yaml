@@ -274,12 +274,18 @@ jobs:
           # Check if profile exists
           if ! az network profile list -g RenoPilotContainerRG --query "[?name=='$PROFILE_NAME'].id" -o tsv | grep -q .; then
             echo "Creating network profile..."
+            # Get subscription ID first - command substitution doesn't work in single quotes
+            SUBSCRIPTION_ID=$(az account show --query id -o tsv)
             az network profile create \
               --name $PROFILE_NAME \
               --resource-group RenoPilotContainerRG \
               --location australiaeast \
-              --network-interface-configuration \
-                subnetId="/subscriptions/$(az account show --query id -o tsv)/resourceGroups/RenoPilotContainerRG/providers/Microsoft.Network/virtualNetworks/renopilot-container-vpc/subnets/ContainerPublicSubnet"
+              --container-network-interface-configuration '{
+                "ipConfigurations":[{
+                  "name":"ipconfigprofile",
+                  "subnetId":"/subscriptions/'$SUBSCRIPTION_ID'/resourceGroups/RenoPilotContainerRG/providers/Microsoft.Network/virtualNetworks/renopilot-container-vpc/subnets/ContainerPublicSubnet"
+                }]
+              }'
           else
             echo "Network profile already exists"
           fi
