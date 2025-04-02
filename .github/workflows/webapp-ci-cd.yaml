@@ -299,8 +299,7 @@ jobs:
             --resource-group RenoPilotWebAppRG \
             --plan renopilot-plan \
             --name renopilot-webapp \
-            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
-            --is-linux
+            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
           
           # Configure environment variables for the web app
           az webapp config appsettings set \
