@@ -659,38 +659,8 @@ jobs:
               DB_PORT=1433 \
               WEBSITES_PORT=3838 \
               DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
-            
-            # Make sure container continuous deployment is enabled
-            az webapp config appsettings set \
-              --resource-group RenoPilotWebAppRG \
-              --name $WEBAPP_NAME \
-              --settings \
-              DOCKER_ENABLE_CI=true
-            
-            # Integrate web app with VNet
-            echo "Integrating Web App with VNet..."
-            az webapp vnet-integration add \
-              --name $WEBAPP_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --vnet ${{ env.VNET_NAME }} \
-              --subnet ${{ env.PUBLIC_SUBNET_NAME }}
-            
-            # Allow the web app to be accessible from anywhere
-            az webapp config access-restriction remove \
-              --name $WEBAPP_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --rule-name "Allow all" \
-              --action Allow \
-              --ip-address "Any" \
-              --priority 100
-            
-            # Ensure the web app is publicly accessible
-            echo "Ensuring web app is publicly accessible..."
-            az webapp update \
-              --name $WEBAPP_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --https-only false
-    
+          fi
+
     - name: Deploy to Azure Web App
       uses: azure/webapps-deploy@v2
       id: deploy
