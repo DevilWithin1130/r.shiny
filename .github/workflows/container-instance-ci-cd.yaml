@@ -125,6 +125,7 @@ jobs:
             echo "Infrastructure cleanup complete."
           else
             echo "No existing infrastructure found. Proceeding with fresh deployment."
+          fi
 
     - name: Create VPC and Subnets
       uses: azure/cli@v1
