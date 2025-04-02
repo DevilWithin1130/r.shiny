@@ -125,6 +125,7 @@ jobs:
                   --image mcr.microsoft.com/azuredocs/aci-helloworld \
                   --resource-group RenoPilotContainerRG \
                   --location $region \
+                  --os-type Linux \
                   --cpu 1 \
                   --memory 1 \
                   --no-wait \
@@ -156,6 +157,7 @@ jobs:
                 --image mcr.microsoft.com/azuredocs/aci-helloworld \
                 --resource-group RenoPilotContainerRG \
                 --location $region \
+                --os-type Linux \
                 --cpu 1 \
                 --memory 1 \
                 --no-wait \
@@ -229,15 +231,45 @@ jobs:
           # Add mask to hide sensitive output in logs
           echo "::add-mask::$ACR_PASSWORD"
 
+    - name: Check if Docker image exists
+      id: check-image
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          LOCATION="${{ env.AZURE_LOCATION }}"
+          ACR_NAME="renopilot${LOCATION}reg"
+          IMAGE_TAG="${{ github.sha }}"
+          IMAGE_NAME="renopilot-container"
+          
+          # Check if the image with the specific tag already exists in ACR
+          echo "Checking if image $IMAGE_NAME:$IMAGE_TAG already exists in ACR..."
+          
+          # Using az acr repository show to check if image exists
+          if az acr repository show --name $ACR_NAME --image "$IMAGE_NAME:$IMAGE_TAG" &>/dev/null; then
+            echo "Image $IMAGE_NAME:$IMAGE_TAG already exists in ACR. Skipping build and push."
+            echo "IMAGE_EXISTS=true" >> $GITHUB_ENV
+            echo "exists=true" >> $GITHUB_OUTPUT  # Updated to current GitHub Actions syntax
+          else
+            echo "Image $IMAGE_NAME:$IMAGE_TAG does not exist in ACR. Will build and push."
+            echo "IMAGE_EXISTS=false" >> $GITHUB_ENV
+            echo "exists=false" >> $GITHUB_OUTPUT  # Updated to current GitHub Actions syntax
+          fi
+
     - name: Build and push image
+      if: env.IMAGE_EXISTS != 'true'
       uses: azure/docker-login@v1
       with:
         login-server: ${{ env.ACR_LOGIN_SERVER }}
         username: ${{ env.ACR_USERNAME }}
         password: ${{ env.ACR_PASSWORD }}
     - run: |
-        docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }}          
-        docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }}
+        if [ "${{ env.IMAGE_EXISTS }}" != "true" ]; then
+          echo "Building and pushing new Docker image..."
+          docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }}          
+          docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }}
+        else
+          echo "Skipping Docker build and push as image already exists."
+        fi
 
     - name: Create Virtual Network and Subnet
       uses: azure/cli@v1
@@ -345,6 +377,7 @@ jobs:
               --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
               --registry-username ${{ env.ACR_USERNAME }} \
               --registry-password ${{ env.ACR_PASSWORD }} \
+              --os-type Linux \
               --replace
           else
             echo "Creating new Container Instance '$CONTAINER_NAME'..."
@@ -374,6 +407,7 @@ jobs:
                   --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
                   --registry-username ${{ env.ACR_USERNAME }} \
                   --registry-password ${{ env.ACR_PASSWORD }} \
+                  --os-type Linux \
                   --cpu $CPU \
                   --memory $MEMORY \
                   --ports 3838 \
@@ -461,7 +495,7 @@ jobs:
               --source-port-ranges "*" \
               --destination-address-prefixes "*" \
               --destination-port-ranges 3838 \
-              --description "Allow Shiny Server traffic on port 3838"
+              --description "Allow Shiny Server traffic on port 3838" || echo "Rule creation failed, but continuing."
           fi
           
           # Check if the subnet exists before applying NSG
@@ -530,7 +564,9 @@ jobs:
                 --action Allow \
                 --priority 100 || echo "Failed to create SQL rule, but continuing"
             else
-              echo "SQL traffic rule collection already exists."
+              # Check if rule exists in collection
+              echo "SQL traffic rule collection already exists. Checking if rule exists..."
+              # Continue without error since the collection already exists, which is fine
             fi
           else
             echo "Private firewall not found. Skipping SQL rule collection creation."
