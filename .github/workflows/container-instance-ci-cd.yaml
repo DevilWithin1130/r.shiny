@@ -273,26 +273,42 @@ jobs:
           
           # Check if profile exists
           if ! az network profile list -g RenoPilotContainerRG --query "[?name=='$PROFILE_NAME'].id" -o tsv | grep -q .; then
-            echo "Creating network profile..."
-            # Get subscription ID first - command substitution doesn't work in single quotes
+            echo "Creating network profile using network-container-group approach..."
+            
+            # Get subscription ID
             SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-            az network profile create \
-              --name $PROFILE_NAME \
+            
+            # Create a temporary container group with network profile
+            echo "Creating temporary container group to generate network profile..."
+            az container create \
+              --name temp-container-for-network \
               --resource-group RenoPilotContainerRG \
+              --image mcr.microsoft.com/azuredocs/aci-helloworld \
+              --vnet renopilot-container-vpc \
+              --subnet ContainerPublicSubnet \
               --location australiaeast \
-              --container-network-interface-configuration '{
-                "ipConfigurations":[{
-                  "name":"ipconfigprofile",
-                  "subnetId":"/subscriptions/'$SUBSCRIPTION_ID'/resourceGroups/RenoPilotContainerRG/providers/Microsoft.Network/virtualNetworks/renopilot-container-vpc/subnets/ContainerPublicSubnet"
-                }]
-              }'
+              --restart-policy Never
+              
+            # Get the ID of the created network profile (ACI creates it automatically)
+            PROFILE_ID=$(az network profile list -g RenoPilotContainerRG --query "[?name=='$PROFILE_NAME' || contains(name, 'containernetworkprofile')].id" -o tsv | head -1)
+            
+            # Delete the temporary container
+            echo "Deleting temporary container..."
+            az container delete --name temp-container-for-network --resource-group RenoPilotContainerRG --yes
+            
+            if [ -z "$PROFILE_ID" ]; then
+              echo "Error: Failed to create network profile"
+              exit 1
+            fi
+            
+            echo "Network profile created with ID: $PROFILE_ID"
           else
             echo "Network profile already exists"
+            PROFILE_ID=$(az network profile show --name $PROFILE_NAME --resource-group RenoPilotContainerRG --query id -o tsv)
           fi
           
-          PROFILE_ID=$(az network profile show --name $PROFILE_NAME --resource-group RenoPilotContainerRG --query id -o tsv)
-          
           # Deploy container with VNet integration
+          echo "Creating production container with network profile..."
           az container create \
             --resource-group RenoPilotContainerRG \
             --name renopilotfenceappinstance \
