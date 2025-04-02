@@ -141,7 +141,7 @@ jobs:
         inlineScript: |
           # Create Resource Group
           echo "Creating Resource Group..."
-          az group create --name RenoPilotWebAppRG --location australiaeast
+          az group create --name RenoPilotWebAppRG --location australiacentral
           
           # Verify resource group was created
           echo "Verifying Resource Group creation..."
@@ -159,7 +159,7 @@ jobs:
           az network vnet create \
             --name renopilot-webapp-vpc \
             --resource-group RenoPilotWebAppRG \
-            --location australiaeast \
+            --location australiacentral \
             --address-prefix 10.1.0.0/16
           
           # Verify VNet was created
@@ -195,7 +195,7 @@ jobs:
           az network nsg create \
             --name webapp-public-nsg \
             --resource-group RenoPilotWebAppRG \
-            --location australiaeast
+            --location australiacentral
             
           # Apply NSG to the subnet
           az network vnet subnet update \
@@ -213,20 +213,20 @@ jobs:
           az network firewall create \
             --name webapp-publicfw \
             --resource-group RenoPilotWebAppRG \
-            --location australiaeast
+            --location australiacentral
             
           # Create Private Firewall
           az network firewall create \
             --name webapp-privatefw \
             --resource-group RenoPilotWebAppRG \
-            --location australiaeast
+            --location australiacentral
           
           # Create a route table for the subnet
           echo "Creating route table for public subnet..."
           az network route-table create \
             --name webapp-public-routes \
             --resource-group RenoPilotWebAppRG \
-            --location australiaeast
+            --location australiacentral
           
           # Add the route table to the subnet
           az network vnet subnet update \
@@ -248,7 +248,7 @@ jobs:
             --resource-group RenoPilotWebAppRG \
             --name $ACR_NAME \
             --sku Standard \
-            --location australiaeast \
+            --location australiacentral \
             --admin-enabled true  # Enables admin authentication for testing, consider disabling in production
           
           # Retrieve and store registry credentials securely in GitHub environment
@@ -282,7 +282,7 @@ jobs:
             --resource-group RenoPilotWebAppRG \
             --is-linux \
             --sku B1 \
-            --location australiaeast
+            --location australiacentral
 
     - name: Create Web App
       uses: azure/cli@v1
