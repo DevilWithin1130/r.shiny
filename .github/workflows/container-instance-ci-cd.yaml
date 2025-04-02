@@ -268,22 +268,10 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Get subnet ID for direct usage in container creation
-          SUBNET_ID=$(az network vnet subnet show \
-            --resource-group RenoPilotContainerRG \
-            --vnet-name renopilot-container-vpc \
-            --name ContainerPublicSubnet \
-            --query id -o tsv)
-            
-          if [ -z "$SUBNET_ID" ]; then
-            echo "Error: Could not retrieve subnet ID"
-            exit 1
-          fi
+          # Properly escape the password by storing it in a variable with single quotes
+          DB_PWD='${{ secrets.DB_PASSWORD }}'
           
-          echo "Using subnet ID: $SUBNET_ID"
-          
-          # Create container directly with subnet configuration
-          # This will either use existing network profile or create one as needed
+          # Create container without subnet integration
           echo "Creating production container instance..."
           az container create \
             --resource-group RenoPilotContainerRG \
@@ -296,8 +284,7 @@ jobs:
             --dns-name-label renopilot-container-${{ github.run_number }} \
             --ports 80 3838 \
             --environment-variables DOCKER_ENV=true DB_SERVER=shiny.database.windows.net DB_NAME=Shiny DB_USER=shiny DB_DRIVER="ODBC Driver 18 for SQL Server" DB_PORT=1433 \
-            --secure-environment-variables DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
-            --subnet $SUBNET_ID \
+            --secure-environment-variables DB_PASSWORD="$DB_PWD" \
             --location australiaeast
 
     - name: Configure Network Security Rules
