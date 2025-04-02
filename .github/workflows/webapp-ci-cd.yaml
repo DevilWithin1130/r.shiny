@@ -176,8 +176,40 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Explicitly use Australia Central for all resources
-          LOCATION="australiacentral"
+          # Try a list of regions in order of preference until we find one with available quota
+          REGIONS=("australiaeast" "eastus" "westus2" "westeurope" "southeastasia" "centralus")
+          LOCATION=""
+          
+          echo "Finding a region with available App Service Plan quota..."
+          for region in "${REGIONS[@]}"; do
+            echo "Checking quota for region: $region"
+            # We'll do a simple check by trying to create a temporary plan with a minimal SKU
+            if az appservice plan create \
+              --name "temp-quota-check" \
+              --resource-group RenoPilotWebAppRG \
+              --is-linux \
+              --sku F1 \
+              --location $region &>/dev/null; then
+              
+              echo "Found region with quota: $region"
+              LOCATION=$region
+              
+              # Clean up the temporary plan
+              echo "Cleaning up temporary test plan..."
+              az appservice plan delete --name "temp-quota-check" --resource-group RenoPilotWebAppRG --yes
+              break
+            else
+              echo "Region $region has insufficient quota or other issues."
+            fi
+          done
+          
+          # If no region with quota was found
+          if [ -z "$LOCATION" ]; then
+            echo "ERROR: Could not find any region with available App Service Plan quota."
+            echo "Please request a quota increase through the Azure portal or contact Azure support."
+            exit 1
+          fi
+          
           echo "Using location: $LOCATION"
           
           # Store location for use in later steps
@@ -270,6 +302,38 @@ jobs:
             --resource-group RenoPilotWebAppRG \
             --location $LOCATION
           
+          # Add explicit inbound rule for Shiny Server port 3838
+          echo "Adding inbound security rule for Shiny port 3838..."
+          az network nsg rule create \
+            --name AllowShinyInbound \
+            --nsg-name $NSG_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --priority 100 \
+            --direction Inbound \
+            --access Allow \
+            --protocol Tcp \
+            --source-address-prefixes "*" \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges 3838 \
+            --description "Allow Shiny Server traffic on port 3838"
+          
+          # Add HTTP/HTTPS inbound rules for web traffic
+          echo "Adding inbound security rule for HTTP/HTTPS..."
+          az network nsg rule create \
+            --name AllowHTTPInbound \
+            --nsg-name $NSG_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --priority 200 \
+            --direction Inbound \
+            --access Allow \
+            --protocol Tcp \
+            --source-address-prefixes "*" \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges 80 443 \
+            --description "Allow HTTP/HTTPS traffic"
+          
           # Store NSG name for later steps
           echo "NSG_NAME=$NSG_NAME" >> $GITHUB_ENV
             
@@ -285,7 +349,7 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          LOCATION="australiacentral"
+          LOCATION="${{ env.AZURE_LOCATION }}"
           echo "Creating Firewalls..."
           
           # Create Public Firewall with region-specific name
@@ -298,7 +362,7 @@ jobs:
           
           # Store firewall name for later steps
           echo "PUBLIC_FW_NAME=$PUBLIC_FW_NAME" >> $GITHUB_ENV
-            
+          
           # Create Private Firewall with region-specific name
           PRIVATE_FW_NAME="webapp-privatefw-$LOCATION"
           echo "Creating Private Firewall '$PRIVATE_FW_NAME'..."
@@ -333,7 +397,7 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          LOCATION="australiacentral"
+          LOCATION="${{ env.AZURE_LOCATION }}"
           # Use a unique ACR name that includes location (ACR names must be globally unique)
           ACR_NAME="renopilot${LOCATION}reg"
           echo "Creating Container Registry '$ACR_NAME'..."
@@ -372,42 +436,48 @@ jobs:
       with:
         inlineScript: |
           # Create App Service Plan with region-specific name
-          LOCATION="australiacentral"
+          LOCATION="${{ env.AZURE_LOCATION }}"
           APP_PLAN_NAME="renopilot-plan-$LOCATION"
           echo "Creating App Service Plan '$APP_PLAN_NAME'..."
           
+          # Try different SKUs if facing quota issues
+          SKUS=("B1" "S1" "P1v2" "F1")
           MAX_RETRIES=3
           
-          for ((i=1; i<=MAX_RETRIES; i++)); do
-            echo "Attempt $i of $MAX_RETRIES to create App Service Plan..."
+          # First try with different SKUs
+          for SKU in "${SKUS[@]}"; do
+            echo "Attempting to create App Service Plan with SKU: $SKU"
             
-            if az appservice plan create \
-              --name $APP_PLAN_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --is-linux \
-              --sku B1 \
-              --location $LOCATION; then
+            for ((i=1; i<=MAX_RETRIES; i++)); do
+              echo "Attempt $i of $MAX_RETRIES to create App Service Plan with SKU $SKU..."
               
-              echo "App Service Plan created successfully!"
-              echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
-              break
-            else
-              echo "Failed to create App Service Plan. Waiting before retry..."
-              if [ $i -lt $MAX_RETRIES ]; then
-                # Exponential backoff - wait longer with each retry
-                SLEEP_TIME=$((30 * i))
-                echo "Waiting for $SLEEP_TIME seconds before next attempt..."
-                sleep $SLEEP_TIME
+              if az appservice plan create \
+                --name $APP_PLAN_NAME \
+                --resource-group RenoPilotWebAppRG \
+                --is-linux \
+                --sku $SKU \
+                --location $LOCATION; then
+                
+                echo "App Service Plan created successfully with SKU $SKU!"
+                echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+                echo "APP_PLAN_SUCCESS=true" >> $GITHUB_ENV
+                break 2  # Break out of both loops
               else
-                echo "Maximum retries reached. Could not create App Service Plan."
-                exit 1
+                echo "Failed to create App Service Plan with SKU $SKU. Waiting before retry..."
+                if [ $i -lt $MAX_RETRIES ]; then
+                  # Exponential backoff - wait longer with each retry
+                  SLEEP_TIME=$((20 * i))
+                  echo "Waiting for $SLEEP_TIME seconds before next attempt..."
+                  sleep $SLEEP_TIME
+                fi
               fi
-            fi
+            done
           done
           
-          # Verify App Service Plan exists
+          # Check if we succeeded with any SKU
           if ! az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Error: App Service Plan $APP_PLAN_NAME was not created successfully."
+            echo "ERROR: All attempts to create App Service Plan failed."
+            echo "Please check your Azure subscription quota limits and try again."
             exit 1
           fi
 
@@ -415,7 +485,7 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          LOCATION="australiacentral"
+          LOCATION="${{ env.AZURE_LOCATION }}"
           # Create Web App with region-specific name
           WEBAPP_NAME="renopilot-webapp-$LOCATION"
           echo "Creating Web App '$WEBAPP_NAME'..."
@@ -455,12 +525,21 @@ jobs:
             --container-registry-user ${{ env.ACR_USERNAME }} \
             --container-registry-password ${{ env.ACR_PASSWORD }}
             
-          # Configure the ports for the web app
+          # Explicitly set the ports for the web app and ensure WEBSITES_PORT is set to 3838
           az webapp config appsettings set \
             --resource-group RenoPilotWebAppRG \
             --name $WEBAPP_NAME \
             --settings \
             WEBSITES_PORT=3838
+          
+          # Configure container port mapping explicitly
+          echo "Configuring port mapping for the container..."
+          az webapp config container set \
+            --name $WEBAPP_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
+            --enable-app-service-storage false \
+            --port 3838
           
           # Integrate web app with VNet
           echo "Integrating Web App with VNet..."
@@ -478,6 +557,13 @@ jobs:
             --action Allow \
             --ip-address "Any" \
             --priority 100
+          
+          # Ensure the web app is publicly accessible
+          echo "Ensuring web app is publicly accessible..."
+          az webapp update \
+            --name $WEBAPP_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --https-only false
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
@@ -509,7 +595,7 @@ jobs:
             --destination-addresses 10.1.2.0/24 \
             --action Allow \
             --priority 200
-            
+          
           echo "Creating HTTP rule collection..."
           az network firewall network-rule create \
             --collection-name webtraffic \
@@ -522,7 +608,7 @@ jobs:
             --destination-addresses 10.1.1.0/24 \
             --action Allow \
             --priority 300
-            
+          
           echo "Creating Shiny rule collection..."  
           az network firewall network-rule create \
             --collection-name shinytraffic \
