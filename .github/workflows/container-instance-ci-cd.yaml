@@ -331,19 +331,57 @@ jobs:
         if [ "${{ env.IMAGE_EXISTS }}" != "true" ]; then
           echo "Building and pushing new Docker image from RenoPilot.Container.2025 repository..."
           
-          # Clone the repository
-          git clone https://github.com/RenoPilot/RenoPilot.Container.2025.git temp-container-repo
-          cd temp-container-repo
+          # Clone the repository with authentication
+          echo "Cloning repository with GitHub token for authentication..."
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/RenoPilot/RenoPilot.Container.2025.git temp-container-repo
           
-          # Build the Docker image
-          docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA }}
+          # Check if clone was successful
+          if [ $? -ne 0 ]; then
+            echo "Failed to clone repository. Trying alternative approach..."
+            # Try alternative approach with personal token if available
+            if [ -n "${{ secrets.RENOPILOT_TOKEN }}" ]; then
+              echo "Using RENOPILOT_TOKEN for authentication..."
+              git clone https://x-access-token:${{ secrets.RENOPILOT_TOKEN }}@github.com/RenoPilot/RenoPilot.Container.2025.git temp-container-repo
+            else
+              echo "Trying public clone as last resort..."
+              # Try public clone as last resort
+              GIT_TERMINAL_PROMPT=0 git clone https://github.com/RenoPilot/RenoPilot.Container.2025.git temp-container-repo
+            fi
+          fi
           
-          # Push the image to ACR
-          docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA }}
-          
-          # Clean up
-          cd .. 
-          rm -rf temp-container-repo
+          # Verify clone and proceed with build
+          if [ -d "temp-container-repo" ]; then
+            echo "Repository successfully cloned. Proceeding with Docker build..."
+            cd temp-container-repo
+            
+            # Check if Dockerfile exists
+            if [ -f "containerResources/dockerfile" ]; then
+              echo "Dockerfile found. Building image..."
+              docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA }}
+              
+              # Check build success and push
+              if [ $? -eq 0 ]; then
+                echo "Docker build successful. Pushing to ACR..."
+                docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA }}
+              else
+                echo "Docker build failed. See logs for details."
+                exit 1
+              fi
+            else
+              echo "Error: Dockerfile not found at containerResources/dockerfile"
+              echo "Repository contents:"
+              find . -type f | sort
+              exit 1
+            fi
+            
+            # Clean up
+            cd .. 
+            rm -rf temp-container-repo
+          else
+            echo "ERROR: Failed to clone repository after multiple attempts."
+            echo "Please verify repository access permissions and try again."
+            exit 1
+          fi
         else
           echo "Skipping Docker build and push as image already exists."
         fi
