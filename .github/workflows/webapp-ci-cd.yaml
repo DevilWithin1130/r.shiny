@@ -137,7 +137,7 @@ jobs:
               echo "No App Service Plans found to clean up."
             fi
             
-            # 3. First remove NSG associations from subnets
+            # 3. First remove NSG associations from subnets - FIX ERROR HERE
             echo "Removing NSG associations from subnets..."
             VNETS=$(az network vnet list --resource-group RenoPilotWebAppRG --query "[].name" -o tsv)
             if [ -n "$VNETS" ]; then
@@ -145,7 +145,25 @@ jobs:
                 SUBNETS=$(az network vnet subnet list --resource-group RenoPilotWebAppRG --vnet-name $VNET --query "[].name" -o tsv)
                 for SUBNET in $SUBNETS; do
                   echo "Removing NSG association from subnet: $SUBNET in VNet: $VNET"
-                  az network vnet subnet update --resource-group RenoPilotWebAppRG --vnet-name $VNET --name $SUBNET --network-security-group "" --route-table ""
+                  # Check for existing NSG association first
+                  NSG_ID=$(az network vnet subnet show --resource-group RenoPilotWebAppRG --vnet-name $VNET --name $SUBNET --query "networkSecurityGroup.id" -o tsv 2>/dev/null || echo "")
+                  RT_ID=$(az network vnet subnet show --resource-group RenoPilotWebAppRG --vnet-name $VNET --name $SUBNET --query "routeTable.id" -o tsv 2>/dev/null || echo "")
+                  
+                  # Remove NSG association if it exists
+                  if [ -n "$NSG_ID" ] && [ "$NSG_ID" != "null" ]; then
+                    echo "Removing NSG association from subnet $SUBNET"
+                    az network vnet subnet update --resource-group RenoPilotWebAppRG --vnet-name $VNET --name $SUBNET --remove networkSecurityGroup || echo "Failed to remove NSG from subnet $SUBNET, continuing..."
+                  else
+                    echo "No NSG association found for subnet $SUBNET"
+                  fi
+                  
+                  # Remove route table association if it exists
+                  if [ -n "$RT_ID" ] && [ "$RT_ID" != "null" ]; then
+                    echo "Removing route table association from subnet $SUBNET"
+                    az network vnet subnet update --resource-group RenoPilotWebAppRG --vnet-name $VNET --name $SUBNET --remove routeTable || echo "Failed to remove route table from subnet $SUBNET, continuing..."
+                  else
+                    echo "No route table association found for subnet $SUBNET"
+                  fi
                 done
               done
               # Wait for association removal to complete
