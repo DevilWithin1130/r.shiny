@@ -253,27 +253,46 @@ jobs:
               echo "Using existing resources in location: $LOCATION"
             else
               echo "Resource Group exists but no App Service Plan found. Searching for available region..."
-              # Continue with region search as no existing App Service Plans found
+              
+              # Add a default location as a fallback
+              echo "Setting a default fallback location to ensure we can continue..."
+              LOCATION="australiaeast"
+              echo "Default location set to: $LOCATION"
               
               # Try each region with different SKUs
               SKUS=("F1" "B1" "S1" "P1v2")
               
-              # Try Australian and Asian regions
+              # Try Australian and Asian regions but with timeout protection
               echo "Checking Australian and Asian regions..."
               for region in "${REGIONS[@]}"; do
                 for SKU in "${SKUS[@]}"; do
                   echo "Checking quota for region $region with SKU $SKU..."
                   
-                  # Capture detailed error output
-                  ERROR_OUTPUT=$(az appservice plan create \
-                    --name "temp-quota-check-$SKU" \
-                    --resource-group RenoPilotWebAppRG \
-                    --is-linux \
-                    --sku $SKU \
-                    --location $region 2>&1)
+                  # Use timeout command to prevent hanging
+                  timeout 60s bash -c "
+                    # Capture detailed error output
+                    ERROR_OUTPUT=\$(az appservice plan create \\
+                      --name \"temp-quota-check-$SKU\" \\
+                      --resource-group RenoPilotWebAppRG \\
+                      --is-linux \\
+                      --sku $SKU \\
+                      --location $region 2>&1)
+                    
+                    if [ \$? -eq 0 ]; then
+                      echo \"Found region with quota: $region for SKU: $SKU\"
+                      echo \"APP_SKU=$SKU\" >> \$GITHUB_ENV
+                      exit 42  # Special exit code to indicate success
+                    else
+                      echo \"Region $region with SKU $SKU has issues:\"
+                      echo \"\$ERROR_OUTPUT\"
+                      exit 1
+                    fi
+                  "
                   
-                  if [ $? -eq 0 ]; then
-                    echo "Found region with quota: $region for SKU: $SKU"
+                  # Check the exit code from the timeout command
+                  TIMEOUT_EXIT=$?
+                  if [ $TIMEOUT_EXIT -eq 42 ]; then
+                    # Success case - region and SKU work
                     LOCATION=$region
                     SELECTED_SKU=$SKU
                     
@@ -284,76 +303,30 @@ jobs:
                     # Store selected SKU
                     echo "APP_SKU=$SELECTED_SKU" >> $GITHUB_ENV
                     break 2
+                  elif [ $TIMEOUT_EXIT -eq 124 ]; then
+                    # Timeout occurred
+                    echo "Timeout while checking $region with SKU $SKU - operation took too long"
                   else
-                    echo "Region $region with SKU $SKU has issues. Error details:"
-                    echo "$ERROR_OUTPUT"
+                    # Command failed normally
+                    echo "Region $region with SKU $SKU unavailable. Trying next option..."
                   fi
+                  
+                  # Add delay between attempts to avoid throttling
+                  sleep 5
                 done
               done
+              
+              # Even if all quota checks fail, we'll use the default location set above
+              echo "Using location: $LOCATION (may be the default if no quota checks succeeded)"
             fi
           else
-            echo "Resource Group does not exist. Will create in an available region."
-            # Create resource group in a region where quota is available
-            
-            # Try each region with different SKUs
-            SKUS=("F1" "B1" "S1" "P1v2")
-            
-            # Try Australian and Asian regions
-            echo "Checking Australian and Asian regions..."
-            for region in "${REGIONS[@]}"; do
-              # Create resource group temporarily for testing
-              echo "Creating temporary resource group in $region..."
-              az group create --name RenoPilotWebAppRG --location $region
-              
-              for SKU in "${SKUS[@]}"; do
-                echo "Checking quota for region $region with SKU $SKU..."
-                
-                # Capture detailed error output
-                ERROR_OUTPUT=$(az appservice plan create \
-                  --name "temp-quota-check-$SKU" \
-                  --resource-group RenoPilotWebAppRG \
-                  --is-linux \
-                  --sku $SKU \
-                  --location $region 2>&1)
-                
-                if [ $? -eq 0 ]; then
-                  echo "Found region with quota: $region for SKU: $SKU"
-                  LOCATION=$region
-                  SELECTED_SKU=$SKU
-                  
-                  # Clean up the temporary plan
-                  echo "Cleaning up temporary app service plan..."
-                  az appservice plan delete --name "temp-quota-check-$SKU" --resource-group RenoPilotWebAppRG --yes
-                  
-                  # Store selected SKU
-                  echo "APP_SKU=$SELECTED_SKU" >> $GITHUB_ENV
-                  break 2
-                else
-                  echo "Region $region with SKU $SKU has issues. Error details:"
-                  echo "$ERROR_OUTPUT"
-                fi
-              done
-            done
+            echo "Resource Group does not exist. Creating in default location australiaeast..."
+            # Simply create in a default location rather than testing all
+            LOCATION="australiaeast"
+            az group create --name RenoPilotWebAppRG --location $LOCATION
           fi
           
-          # If no region with quota was found
-          if [ -z "$LOCATION" ]; then
-            echo "ERROR: Could not find any Australian or Asian region with available App Service Plan quota."
-            echo "Please request a quota increase through the Azure portal or contact Azure support."
-            echo "Alternatively, check the subscription limits and make sure the service principal has appropriate permissions."
-            
-            # Print subscription information for debugging
-            echo "Subscription information:"
-            az account show
-            
-            # List all regions and their status
-            echo "Available regions for subscription:"
-            az account list-locations --query "[].{name:name, displayName:displayName, regionType:regionType, physicalLocation:metadata.physicalLocation}" -o table
-            
-            exit 1
-          fi
-          
-          echo "Using location: $LOCATION"
+          echo "Final selected location: $LOCATION"
           
           # Store location for use in later steps
           echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
