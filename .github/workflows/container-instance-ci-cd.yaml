@@ -268,51 +268,28 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Create network profile if it doesn't exist
-          PROFILE_NAME="container-network-profile"
-          
-          # Check if profile exists
-          if ! az network profile list -g RenoPilotContainerRG --query "[?name=='$PROFILE_NAME'].id" -o tsv | grep -q .; then
-            echo "Creating network profile using network-container-group approach..."
+          # Get subnet ID for direct usage in container creation
+          SUBNET_ID=$(az network vnet subnet show \
+            --resource-group RenoPilotContainerRG \
+            --vnet-name renopilot-container-vpc \
+            --name ContainerPublicSubnet \
+            --query id -o tsv)
             
-            # Get subscription ID
-            SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-            
-            # Create a temporary container group with network profile
-            echo "Creating temporary container group to generate network profile..."
-            az container create \
-              --name temp-container-for-network \
-              --resource-group RenoPilotContainerRG \
-              --image mcr.microsoft.com/azuredocs/aci-helloworld \
-              --vnet renopilot-container-vpc \
-              --subnet ContainerPublicSubnet \
-              --location australiaeast \
-              --restart-policy Never
-              
-            # Get the ID of the created network profile (ACI creates it automatically)
-            PROFILE_ID=$(az network profile list -g RenoPilotContainerRG --query "[?name=='$PROFILE_NAME' || contains(name, 'containernetworkprofile')].id" -o tsv | head -1)
-            
-            # Delete the temporary container
-            echo "Deleting temporary container..."
-            az container delete --name temp-container-for-network --resource-group RenoPilotContainerRG --yes
-            
-            if [ -z "$PROFILE_ID" ]; then
-              echo "Error: Failed to create network profile"
-              exit 1
-            fi
-            
-            echo "Network profile created with ID: $PROFILE_ID"
-          else
-            echo "Network profile already exists"
-            PROFILE_ID=$(az network profile show --name $PROFILE_NAME --resource-group RenoPilotContainerRG --query id -o tsv)
+          if [ -z "$SUBNET_ID" ]; then
+            echo "Error: Could not retrieve subnet ID"
+            exit 1
           fi
           
-          # Deploy container with VNet integration
-          echo "Creating production container with network profile..."
+          echo "Using subnet ID: $SUBNET_ID"
+          
+          # Create container directly with subnet configuration
+          # This will either use existing network profile or create one as needed
+          echo "Creating production container instance..."
           az container create \
             --resource-group RenoPilotContainerRG \
             --name renopilotfenceappinstance \
             --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
+            --os-type Linux \
             --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
             --registry-username ${{ env.ACR_USERNAME }} \
             --registry-password ${{ env.ACR_PASSWORD }} \
@@ -320,7 +297,7 @@ jobs:
             --ports 80 3838 \
             --environment-variables DOCKER_ENV=true DB_SERVER=shiny.database.windows.net DB_NAME=Shiny DB_USER=shiny DB_DRIVER="ODBC Driver 18 for SQL Server" DB_PORT=1433 \
             --secure-environment-variables DB_PASSWORD=${{ secrets.DB_PASSWORD }} \
-            --network-profile $PROFILE_ID \
+            --subnet $SUBNET_ID \
             --location australiaeast
 
     - name: Configure Network Security Rules
