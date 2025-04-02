@@ -10,6 +10,11 @@ on:
     paths-ignore:
     - '.github/workflows/webapp-ci-cd.yaml'
   workflow_dispatch:
+    inputs:
+      preferred_region:
+        description: 'Preferred Azure Region (leave empty for auto-selection)'
+        required: false
+        default: ''
 
 jobs:
   test-app:
@@ -95,9 +100,28 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Only check Australian regions in order of preference
+          # Check if a region was specified in workflow dispatch
+          PREFERRED_REGION="${{ github.event.inputs.preferred_region }}"
+          
+          # Primary regions in order of preference (Australia first, then global fallbacks)
           REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
+          
+          # Global fallback regions if Australian regions are not available
+          FALLBACK_REGIONS=("eastus" "westus2" "centralus" "westeurope" "northeurope" "southeastasia" "eastasia")
+          
           LOCATION=""
+          
+          # If a region was specified via workflow_dispatch, try to use it
+          if [ -n "$PREFERRED_REGION" ]; then
+            echo "Using manually specified region: $PREFERRED_REGION"
+            if az container list-skus --location $PREFERRED_REGION --output none 2>/dev/null; then
+              LOCATION=$PREFERRED_REGION
+              echo "Manually specified region $PREFERRED_REGION is available."
+            else
+              echo "WARNING: Manually specified region $PREFERRED_REGION is not available for Container Instances."
+              echo "Will attempt to find an available region automatically."
+            fi
+          fi
           
           # Check if Resource Group exists
           RG_EXISTS=$(az group exists --name RenoPilotContainerRG)
@@ -105,30 +129,24 @@ jobs:
           if [ "$RG_EXISTS" = "true" ]; then
             echo "Resource Group already exists."
             
-            # If resource group exists, check if we already have resources deployed
-            EXISTING_CONTAINERS=$(az container list --resource-group RenoPilotContainerRG --query "[].{name:name, location:location}" -o json)
-            
-            # If we have existing containers, use their location (only if it's one of our Australian regions)
-            if [ -n "$EXISTING_CONTAINERS" ] && [ "$EXISTING_CONTAINERS" != "[]" ]; then
-              EXISTING_LOCATION=$(echo $EXISTING_CONTAINERS | jq -r '.[0].location')
-              # Verify the existing location is in our allowed regions
-              for region in "${REGIONS[@]}"; do
-                if [ "$region" = "$EXISTING_LOCATION" ]; then
-                  LOCATION=$EXISTING_LOCATION
-                  echo "Using existing resources in Australian region: $LOCATION"
-                  break
-                fi
-              done
+            # If no manually specified region or it was unavailable
+            if [ -z "$LOCATION" ]; then
+              # If resource group exists, check if we already have resources deployed
+              EXISTING_CONTAINERS=$(az container list --resource-group RenoPilotContainerRG --query "[].{name:name, location:location}" -o json)
               
-              # If existing location wasn't in our list, we'll find a new one
-              if [ -z "$LOCATION" ]; then
-                echo "Existing location is not in our approved Australian regions. Finding new region..."
+              # If we have existing containers, use their location
+              if [ -n "$EXISTING_CONTAINERS" ] && [ "$EXISTING_CONTAINERS" != "[]" ]; then
+                EXISTING_LOCATION=$(echo $EXISTING_CONTAINERS | jq -r '.[0].location')
+                echo "Using existing resources location: $EXISTING_LOCATION"
+                LOCATION=$EXISTING_LOCATION
               fi
             fi
             
-            # If no valid location found yet, check Australian regions
+            # If no valid location found yet, check all regions
             if [ -z "$LOCATION" ]; then
-              echo "Searching for available Australian region..."
+              echo "Searching for available region..."
+              
+              # First check Australian regions (preferred)
               for region in "${REGIONS[@]}"; do
                 echo "Checking Australian region availability: $region"
                 if az container list-skus --location $region --output none 2>/dev/null; then
@@ -139,33 +157,68 @@ jobs:
                   echo "Australian region $region not available for Container Instances."
                 fi
               done
+              
+              # If no Australian regions available, try global fallbacks
+              if [ -z "$LOCATION" ]; then
+                echo "No Australian regions available. Checking global fallback regions..."
+                for region in "${FALLBACK_REGIONS[@]}"; do
+                  echo "Checking global region availability: $region"
+                  if az container list-skus --location $region --output none 2>/dev/null; then
+                    echo "Found available global region: $region"
+                    LOCATION=$region
+                    break
+                  else
+                    echo "Global region $region not available for Container Instances."
+                  fi
+                done
+              fi
             fi
           else
-            echo "Resource Group does not exist. Creating in an available Australian region."
-            # Check approved Australian regions
-            for region in "${REGIONS[@]}"; do
-              echo "Checking Australian region availability: $region"
-              if az container list-skus --location $region --output none 2>/dev/null; then
-                echo "Found available Australian region: $region"
-                LOCATION=$region
-                
-                # Create resource group in chosen Australian region
-                az group create --name RenoPilotContainerRG --location $region
-                break
-              else
-                echo "Australian region $region not available for Container Instances."
+            echo "Resource Group does not exist. Creating in an available region."
+            
+            # Try Australian regions first (if no manually specified location)
+            if [ -z "$LOCATION" ]; then
+              for region in "${REGIONS[@]}"; do
+                echo "Checking Australian region availability: $region"
+                if az container list-skus --location $region --output none 2>/dev/null; then
+                  echo "Found available Australian region: $region"
+                  LOCATION=$region
+                  break
+                else
+                  echo "Australian region $region not available for Container Instances."
+                fi
+              done
+              
+              # If no Australian regions available, try global fallbacks
+              if [ -z "$LOCATION" ]; then
+                echo "No Australian regions available. Checking global fallback regions..."
+                for region in "${FALLBACK_REGIONS[@]}"; do
+                  echo "Checking global region availability: $region"
+                  if az container list-skus --location $region --output none 2>/dev/null; then
+                    echo "Found available global region: $region"
+                    LOCATION=$region
+                    break
+                  else
+                    echo "Global region $region not available for Container Instances."
+                  fi
+                done
               fi
-            done
+            fi
+            
+            # Create resource group in chosen region
+            if [ -n "$LOCATION" ]; then
+              az group create --name RenoPilotContainerRG --location $LOCATION
+            fi
           fi
           
-          # If no Australian region was found
+          # If still no region was found
           if [ -z "$LOCATION" ]; then
-            echo "ERROR: Could not find any available Australian region for Container Instances."
-            echo "Please check Azure service availability in Australia or contact Azure support."
+            echo "ERROR: Could not find any available region for Container Instances."
+            echo "Please check Azure service availability or contact Azure support."
             exit 1
           fi
           
-          echo "Using Australian region: $LOCATION"
+          echo "Using region: $LOCATION"
           
           # Store location for use in later steps
           echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
@@ -394,7 +447,7 @@ jobs:
           docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA }}
           
           # Clean up
-          cd ..
+          cd .. 
           rm -rf temp-container-repo
         else
           echo "Skipping Docker build and push as image already exists."
@@ -419,7 +472,7 @@ jobs:
               --resource-group RenoPilotContainerRG \
               --location $LOCATION \
               --address-prefix 10.2.0.0/16
-            
+              
             # Add delay to ensure VNet is fully provisioned
             sleep 10
           fi
@@ -439,7 +492,7 @@ jobs:
               --resource-group RenoPilotContainerRG \
               --address-prefix 10.2.1.0/24 \
               --delegations Microsoft.ContainerInstance/containerGroups
-            
+              
             # Add delay to ensure subnet is fully provisioned
             sleep 10
           fi
