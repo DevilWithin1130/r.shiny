@@ -99,7 +99,80 @@ jobs:
             fi
           done
     
-    - name: Check Existing Infrastructure
+    - name: Check and Clean Existing Infrastructure
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # More aggressive cleanup of resources across all regions
+          echo "Searching for existing resources across all regions..."
+          
+          # 1. Delete Web App first (they depend on other resources)
+          echo "Checking for Web App in any region..."
+          if az webapp show --name renopilot-webapp --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Deleting Web App..."
+            az webapp delete --name renopilot-webapp --resource-group RenoPilotWebAppRG || true
+            # Add delay to ensure deletion completes
+            sleep 30
+          fi
+          
+          # 2. Delete App Service Plan if necessary (in any region)
+          echo "Checking for App Service Plan in any region..."
+          if az appservice plan show --name renopilot-plan --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Deleting App Service Plan..."
+            az appservice plan delete --name renopilot-plan --resource-group RenoPilotWebAppRG --yes || true
+            # Add delay to ensure deletion completes and quota is released
+            sleep 60
+          fi
+          
+          # List all App Service Plans in the subscription to find potential conflicts
+          echo "Checking for other App Service Plans that might cause conflicts..."
+          APP_PLANS=$(az appservice plan list --query "[?contains(name, 'renopilot')].{name:name, resourceGroup:resourceGroup}" -o tsv)
+          if [ -n "$APP_PLANS" ]; then
+            echo "Found potentially conflicting App Service Plans:"
+            echo "$APP_PLANS"
+            echo "Attempting to clean up these plans..."
+            echo "$APP_PLANS" | while read -r name rg; do
+              if [ -n "$name" ] && [ -n "$rg" ]; then
+                echo "Deleting App Service Plan $name in resource group $rg..."
+                az appservice plan delete --name "$name" --resource-group "$rg" --yes || true
+              fi
+            done
+            # Add delay to ensure deletion completes
+            sleep 60
+          fi
+          
+          # 3. Delete ACR
+          echo "Deleting Azure Container Registry..."
+          az acr delete --name renopilotwebappreg --resource-group RenoPilotWebAppRG --yes || true
+          
+          # 4. Check and delete existing NSG in any region
+          echo "Checking for Network Security Group in any region..."
+          if az network nsg show --name webapp-public-nsg --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Deleting existing Network Security Group..."
+            az network nsg delete --name webapp-public-nsg --resource-group RenoPilotWebAppRG || true
+            sleep 30
+          fi
+          
+          # 5. Delete Firewalls
+          echo "Deleting Firewalls..."
+          az network firewall delete --name webapp-publicfw --resource-group RenoPilotWebAppRG || true
+          az network firewall delete --name webapp-privatefw --resource-group RenoPilotWebAppRG || true
+          
+          # 6. Delete Route Table
+          echo "Deleting Route Table..."
+          if az network route-table show --name webapp-public-routes --resource-group RenoPilotWebAppRG &>/dev/null; then
+            az network route-table delete --name webapp-public-routes --resource-group RenoPilotWebAppRG || true
+            sleep 20
+          fi
+          
+          # 7. Delete VNet and subnets
+          echo "Deleting VNet and subnets..."
+          az network vnet delete --name renopilot-webapp-vpc --resource-group RenoPilotWebAppRG || true
+          
+          echo "Infrastructure cleanup complete. Sleeping to ensure all resources are properly released..."
+          sleep 30
+
+    - name: Create VPC and Subnets
       uses: azure/cli@v1
       with:
         inlineScript: |
@@ -107,71 +180,28 @@ jobs:
           REGIONS=("australiaeast" "eastus" "westus2" "westeurope" "southeastasia" "centralus")
           LOCATION=""
           
-          # Check if Resource Group exists
-          RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
-          
-          if [ "$RG_EXISTS" = "true" ]; then
-            echo "Resource Group already exists."
-            
-            # If resource group exists, check if we already have resources deployed
-            # Try to find an existing App Service Plan in the resource group
-            EXISTING_PLANS=$(az appservice plan list --resource-group RenoPilotWebAppRG --query "[].{name:name, location:location}" -o json)
-            
-            # If we have an existing plan, use its location
-            if [ -n "$EXISTING_PLANS" ] && [ "$EXISTING_PLANS" != "[]" ]; then
-              # Use the location of the first plan found
-              LOCATION=$(echo $EXISTING_PLANS | jq -r '.[0].location')
-              echo "Using existing resources in location: $LOCATION"
+          echo "Finding a region with available App Service Plan quota..."
+          for region in "${REGIONS[@]}"; do
+            echo "Checking quota for region: $region"
+            # We'll do a simple check by trying to create a temporary plan with a minimal SKU
+            if az appservice plan create \
+              --name "temp-quota-check" \
+              --resource-group RenoPilotWebAppRG \
+              --is-linux \
+              --sku F1 \
+              --location $region &>/dev/null; then
+              
+              echo "Found region with quota: $region"
+              LOCATION=$region
+              
+              # Clean up the temporary plan
+              echo "Cleaning up temporary test plan..."
+              az appservice plan delete --name "temp-quota-check" --resource-group RenoPilotWebAppRG --yes
+              break
             else
-              echo "Resource Group exists but no App Service Plan found. Searching for available region..."
-              # Continue with region search as no existing App Service Plans found
-              for region in "${REGIONS[@]}"; do
-                echo "Checking quota for region: $region"
-                if az appservice plan create \
-                  --name "temp-quota-check" \
-                  --resource-group RenoPilotWebAppRG \
-                  --is-linux \
-                  --sku F1 \
-                  --location $region &>/dev/null; then
-                  
-                  echo "Found region with quota: $region"
-                  LOCATION=$region
-                  
-                  # Clean up the temporary plan
-                  az appservice plan delete --name "temp-quota-check" --resource-group RenoPilotWebAppRG --yes
-                  break
-                else
-                  echo "Region $region has insufficient quota or other issues."
-                fi
-              done
+              echo "Region $region has insufficient quota or other issues."
             fi
-          else
-            echo "Resource Group does not exist. Will create in an available region."
-            # Continue with region search as no resource group exists
-            for region in "${REGIONS[@]}"; do
-              echo "Checking quota for region: $region"
-              
-              # Create resource group temporarily for testing
-              az group create --name RenoPilotWebAppRG --location $region
-              
-              if az appservice plan create \
-                --name "temp-quota-check" \
-                --resource-group RenoPilotWebAppRG \
-                --is-linux \
-                --sku F1 \
-                --location $region &>/dev/null; then
-                
-                echo "Found region with quota: $region"
-                LOCATION=$region
-                
-                # Clean up the temporary plan
-                az appservice plan delete --name "temp-quota-check" --resource-group RenoPilotWebAppRG --yes
-                break
-              else
-                echo "Region $region has insufficient quota or other issues."
-              fi
-            done
-          fi
+          done
           
           # If no region with quota was found
           if [ -z "$LOCATION" ]; then
@@ -190,78 +220,71 @@ jobs:
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           
           # Check if Resource Group exists
-          if [ "$RG_EXISTS" = "false" ]; then
+          RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
+          
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "Resource Group already exists."
+          else
             echo "Creating Resource Group in $LOCATION..."
             az group create --name RenoPilotWebAppRG --location $LOCATION
           fi
-
-    - name: Create VPC and Subnets
-      uses: azure/cli@v1
-      with:
-        inlineScript: |
-          LOCATION="${{ env.AZURE_LOCATION }}"
+          
+          # Verify resource group exists
+          if ! az group show --name RenoPilotWebAppRG &>/dev/null; then
+            echo "Error: Resource group RenoPilotWebAppRG was not found or created successfully."
+            exit 1
+          fi
+          
+          # Add a delay to ensure resource group is fully provisioned
+          echo "Waiting for resource group to be fully provisioned..."
+          sleep 15
           
           # Create VNet with region-specific name
           VNET_NAME="renopilot-vpc-$LOCATION"
+          echo "Creating VNet '$VNET_NAME'..."
+          az network vnet create \
+            --name $VNET_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --location $LOCATION \
+            --address-prefix 10.1.0.0/16
           
-          # Check if VNet already exists
-          if az network vnet show --name $VNET_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "VNet '$VNET_NAME' already exists. Skipping creation."
-          else
-            echo "Creating VNet '$VNET_NAME'..."
-            az network vnet create \
-              --name $VNET_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --location $LOCATION \
-              --address-prefix 10.1.0.0/16
-            
-            # Add delay to ensure VNet is fully provisioned
-            sleep 10
+          # Verify VNet was created
+          if ! az network vnet show --name $VNET_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Error: VNet $VNET_NAME was not created successfully."
+            exit 1
           fi
           
           # Store VNet name for later steps
           echo "VNET_NAME=$VNET_NAME" >> $GITHUB_ENV
           
+          # Add delay to ensure VNet is fully provisioned
+          sleep 10
+          
           # Public subnet with region-specific name
           PUBLIC_SUBNET_NAME="WebAppPublicSubnet-$LOCATION"
-          
-          # Check if public subnet already exists
-          if az network vnet subnet show --name $PUBLIC_SUBNET_NAME --vnet-name $VNET_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Public Subnet '$PUBLIC_SUBNET_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Public Subnet '$PUBLIC_SUBNET_NAME'..."
-            az network vnet subnet create \
-              --name $PUBLIC_SUBNET_NAME \
-              --vnet-name $VNET_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --address-prefix 10.1.1.0/24 \
-              --delegations Microsoft.Web/serverFarms \
-              --service-endpoints Microsoft.Web
-            
-            # Add delay to ensure subnet is fully provisioned
-            sleep 10
-          fi
+          echo "Creating Public Subnet '$PUBLIC_SUBNET_NAME'..."
+          az network vnet subnet create \
+            --name $PUBLIC_SUBNET_NAME \
+            --vnet-name $VNET_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --address-prefix 10.1.1.0/24 \
+            --delegations Microsoft.Web/serverFarms \
+            --service-endpoints Microsoft.Web
           
           # Store subnet name for later steps
           echo "PUBLIC_SUBNET_NAME=$PUBLIC_SUBNET_NAME" >> $GITHUB_ENV
           
+          # Add delay to ensure subnet is fully provisioned
+          sleep 10
+          
           # Private subnet with region-specific name
           PRIVATE_SUBNET_NAME="WebAppPrivateSubnet-$LOCATION"
-          
-          # Check if private subnet already exists
-          if az network vnet subnet show --name $PRIVATE_SUBNET_NAME --vnet-name $VNET_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Private Subnet '$PRIVATE_SUBNET_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Private Subnet '$PRIVATE_SUBNET_NAME'..."
-            az network vnet subnet create \
-              --name $PRIVATE_SUBNET_NAME \
-              --vnet-name $VNET_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --address-prefix 10.1.2.0/24
-            
-            # Add delay to ensure subnet is fully provisioned
-            sleep 10
-          fi
+          echo "Creating Private Subnet '$PRIVATE_SUBNET_NAME'..."
+          az network vnet subnet create \
+            --name $PRIVATE_SUBNET_NAME \
+            --vnet-name $VNET_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --address-prefix 10.1.2.0/24
           
           # Store subnet name for later steps
           echo "PRIVATE_SUBNET_NAME=$PRIVATE_SUBNET_NAME" >> $GITHUB_ENV
@@ -273,49 +296,43 @@ jobs:
           LOCATION="${{ env.AZURE_LOCATION }}"
           # Create NSG with region-specific name
           NSG_NAME="webapp-nsg-$LOCATION"
+          echo "Creating Network Security Group '$NSG_NAME'..."
+          az network nsg create \
+            --name $NSG_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --location $LOCATION
           
-          # Check if NSG already exists
-          if az network nsg show --name $NSG_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Network Security Group '$NSG_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Network Security Group '$NSG_NAME'..."
-            az network nsg create \
-              --name $NSG_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --location $LOCATION
-            
-            # Add explicit inbound rule for Shiny Server port 3838
-            echo "Adding inbound security rule for Shiny port 3838..."
-            az network nsg rule create \
-              --name AllowShinyInbound \
-              --nsg-name $NSG_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --priority 100 \
-              --direction Inbound \
-              --access Allow \
-              --protocol Tcp \
-              --source-address-prefixes "*" \
-              --source-port-ranges "*" \
-              --destination-address-prefixes "*" \
-              --destination-port-ranges 3838 \
-              --description "Allow Shiny Server traffic on port 3838"
-            
-            # Add HTTP/HTTPS inbound rules for web traffic
-            echo "Adding inbound security rule for HTTP/HTTPS..."
-            az network nsg rule create \
-              --name AllowHTTPInbound \
-              --nsg-name $NSG_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --priority 200 \
-              --direction Inbound \
-              --access Allow \
-              --protocol Tcp \
-              --source-address-prefixes "*" \
-              --source-port-ranges "*" \
-              --destination-address-prefixes "*" \
-              --destination-port-ranges 80 443 \
-              --description "Allow HTTP/HTTPS traffic"
-          fi
+          # Add explicit inbound rule for Shiny Server port 3838
+          echo "Adding inbound security rule for Shiny port 3838..."
+          az network nsg rule create \
+            --name AllowShinyInbound \
+            --nsg-name $NSG_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --priority 100 \
+            --direction Inbound \
+            --access Allow \
+            --protocol Tcp \
+            --source-address-prefixes "*" \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges 3838 \
+            --description "Allow Shiny Server traffic on port 3838"
+          
+          # Add HTTP/HTTPS inbound rules for web traffic
+          echo "Adding inbound security rule for HTTP/HTTPS..."
+          az network nsg rule create \
+            --name AllowHTTPInbound \
+            --nsg-name $NSG_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --priority 200 \
+            --direction Inbound \
+            --access Allow \
+            --protocol Tcp \
+            --source-address-prefixes "*" \
+            --source-port-ranges "*" \
+            --destination-address-prefixes "*" \
+            --destination-port-ranges 80 443 \
+            --description "Allow HTTP/HTTPS traffic"
           
           # Store NSG name for later steps
           echo "NSG_NAME=$NSG_NAME" >> $GITHUB_ENV
@@ -337,51 +354,33 @@ jobs:
           
           # Create Public Firewall with region-specific name
           PUBLIC_FW_NAME="webapp-publicfw-$LOCATION"
-          
-          # Check if public firewall already exists
-          if az network firewall show --name $PUBLIC_FW_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Public Firewall '$PUBLIC_FW_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Public Firewall '$PUBLIC_FW_NAME'..."
-            az network firewall create \
-              --name $PUBLIC_FW_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --location $LOCATION
-          fi
+          echo "Creating Public Firewall '$PUBLIC_FW_NAME'..."
+          az network firewall create \
+            --name $PUBLIC_FW_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --location $LOCATION
           
           # Store firewall name for later steps
           echo "PUBLIC_FW_NAME=$PUBLIC_FW_NAME" >> $GITHUB_ENV
           
           # Create Private Firewall with region-specific name
           PRIVATE_FW_NAME="webapp-privatefw-$LOCATION"
-          
-          # Check if private firewall already exists
-          if az network firewall show --name $PRIVATE_FW_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Private Firewall '$PRIVATE_FW_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Private Firewall '$PRIVATE_FW_NAME'..."
-            az network firewall create \
-              --name $PRIVATE_FW_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --location $LOCATION
-          fi
+          echo "Creating Private Firewall '$PRIVATE_FW_NAME'..."
+          az network firewall create \
+            --name $PRIVATE_FW_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --location $LOCATION
           
           # Store firewall name for later steps
           echo "PRIVATE_FW_NAME=$PRIVATE_FW_NAME" >> $GITHUB_ENV
           
           # Create a route table for the subnet with region-specific name
           ROUTE_TABLE_NAME="webapp-routes-$LOCATION"
-          
-          # Check if route table already exists
-          if az network route-table show --name $ROUTE_TABLE_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Route Table '$ROUTE_TABLE_NAME' already exists. Skipping creation."
-          else
-            echo "Creating route table '$ROUTE_TABLE_NAME'..."
-            az network route-table create \
-              --name $ROUTE_TABLE_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --location $LOCATION
-          fi
+          echo "Creating route table '$ROUTE_TABLE_NAME'..."
+          az network route-table create \
+            --name $ROUTE_TABLE_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --location $LOCATION
           
           # Store route table name for later steps
           echo "ROUTE_TABLE_NAME=$ROUTE_TABLE_NAME" >> $GITHUB_ENV
@@ -401,19 +400,14 @@ jobs:
           LOCATION="${{ env.AZURE_LOCATION }}"
           # Use a unique ACR name that includes location (ACR names must be globally unique)
           ACR_NAME="renopilot${LOCATION}reg"
+          echo "Creating Container Registry '$ACR_NAME'..."
           
-          # Check if ACR already exists
-          if az acr show --name $ACR_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Container Registry '$ACR_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Container Registry '$ACR_NAME'..."
-            az acr create \
-              --resource-group RenoPilotWebAppRG \
-              --name $ACR_NAME \
-              --sku Standard \
-              --location $LOCATION \
-              --admin-enabled true
-          fi
+          az acr create \
+            --resource-group RenoPilotWebAppRG \
+            --name $ACR_NAME \
+            --sku Standard \
+            --location $LOCATION \
+            --admin-enabled true
           
           # Retrieve and store registry credentials securely in GitHub environment
           ACR_LOGIN_SERVER=$(az acr show -n $ACR_NAME --query loginServer -o tsv)
@@ -444,54 +438,48 @@ jobs:
           # Create App Service Plan with region-specific name
           LOCATION="${{ env.AZURE_LOCATION }}"
           APP_PLAN_NAME="renopilot-plan-$LOCATION"
+          echo "Creating App Service Plan '$APP_PLAN_NAME'..."
           
-          # Check if App Service Plan already exists
-          if az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "App Service Plan '$APP_PLAN_NAME' already exists. Skipping creation."
-          else
-            echo "Creating App Service Plan '$APP_PLAN_NAME'..."
+          # Try different SKUs if facing quota issues
+          SKUS=("B1" "S1" "P1v2" "F1")
+          MAX_RETRIES=3
+          
+          # First try with different SKUs
+          for SKU in "${SKUS[@]}"; do
+            echo "Attempting to create App Service Plan with SKU: $SKU"
             
-            # Try different SKUs if facing quota issues
-            SKUS=("B1" "S1" "P1v2" "F1")
-            MAX_RETRIES=3
-            
-            # First try with different SKUs
-            for SKU in "${SKUS[@]}"; do
-              echo "Attempting to create App Service Plan with SKU: $SKU"
+            for ((i=1; i<=MAX_RETRIES; i++)); do
+              echo "Attempt $i of $MAX_RETRIES to create App Service Plan with SKU $SKU..."
               
-              for ((i=1; i<=MAX_RETRIES; i++)); do
-                echo "Attempt $i of $MAX_RETRIES to create App Service Plan with SKU $SKU..."
+              if az appservice plan create \
+                --name $APP_PLAN_NAME \
+                --resource-group RenoPilotWebAppRG \
+                --is-linux \
+                --sku $SKU \
+                --location $LOCATION; then
                 
-                if az appservice plan create \
-                  --name $APP_PLAN_NAME \
-                  --resource-group RenoPilotWebAppRG \
-                  --is-linux \
-                  --sku $SKU \
-                  --location $LOCATION; then
-                  
-                  echo "App Service Plan created successfully with SKU $SKU!"
-                  echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
-                  echo "APP_SKU=$SKU" >> $GITHUB_ENV
-                  echo "APP_PLAN_SUCCESS=true" >> $GITHUB_ENV
-                  break 2  # Break out of both loops
-                else
-                  echo "Failed to create App Service Plan with SKU $SKU. Waiting before retry..."
-                  if [ $i -lt $MAX_RETRIES ]; then
-                    # Exponential backoff - wait longer with each retry
-                    SLEEP_TIME=$((20 * i))
-                    echo "Waiting for $SLEEP_TIME seconds before next attempt..."
-                    sleep $SLEEP_TIME
-                  fi
+                echo "App Service Plan created successfully with SKU $SKU!"
+                echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+                echo "APP_SKU=$SKU" >> $GITHUB_ENV
+                echo "APP_PLAN_SUCCESS=true" >> $GITHUB_ENV
+                break 2  # Break out of both loops
+              else
+                echo "Failed to create App Service Plan with SKU $SKU. Waiting before retry..."
+                if [ $i -lt $MAX_RETRIES ]; then
+                  # Exponential backoff - wait longer with each retry
+                  SLEEP_TIME=$((20 * i))
+                  echo "Waiting for $SLEEP_TIME seconds before next attempt..."
+                  sleep $SLEEP_TIME
                 fi
-              done
+              fi
             done
-            
-            # Check if we succeeded with any SKU
-            if ! az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-              echo "ERROR: All attempts to create App Service Plan failed."
-              echo "Please check your Azure subscription quota limits and try again."
-              exit 1
-            fi
+          done
+          
+          # Check if we succeeded with any SKU
+          if ! az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "ERROR: All attempts to create App Service Plan failed."
+            echo "Please check your Azure subscription quota limits and try again."
+            exit 1
           fi
 
     - name: Create Web App and Configure
@@ -501,70 +489,65 @@ jobs:
           LOCATION="${{ env.AZURE_LOCATION }}"
           # Create Web App with region-specific name
           WEBAPP_NAME="renopilot-webapp-$LOCATION"
+          echo "Creating Web App '$WEBAPP_NAME'..."
           
-          # Check if Web App already exists
-          if az webapp show --name $WEBAPP_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Web App '$WEBAPP_NAME' already exists. Skipping creation."
-          else
-            echo "Creating Web App '$WEBAPP_NAME'..."
-            
-            # Create the web app without the image (we'll deploy separately)
-            az webapp create \
-              --resource-group RenoPilotWebAppRG \
-              --plan ${{ env.APP_PLAN_NAME }} \
-              --name $WEBAPP_NAME \
-              --deployment-container-image-name nginx \
-              --runtime "DOCKER|nginx" 
-            
-            echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
-            
-            # Add delay to ensure webapp is created
-            sleep 15
-            
-            # Configure environment variables for the web app
-            az webapp config appsettings set \
-              --resource-group RenoPilotWebAppRG \
-              --name $WEBAPP_NAME \
-              --settings \
-              DOCKER_ENV=true \
-              DB_SERVER=shiny.database.windows.net \
-              DB_NAME=Shiny \
-              DB_USER=shiny \
-              DB_DRIVER="ODBC Driver 18 for SQL Server" \
-              DB_PORT=1433 \
-              WEBSITES_PORT=3838 \
-              DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
-            
-            # Make sure container continuous deployment is enabled
-            az webapp config appsettings set \
-              --resource-group RenoPilotWebAppRG \
-              --name $WEBAPP_NAME \
-              --settings \
-              DOCKER_ENABLE_CI=true
-            
-            # Integrate web app with VNet
-            echo "Integrating Web App with VNet..."
-            az webapp vnet-integration add \
-              --name $WEBAPP_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --vnet ${{ env.VNET_NAME }} \
-              --subnet ${{ env.PUBLIC_SUBNET_NAME }}
+          # Create the web app without the image (we'll deploy separately)
+          az webapp create \
+            --resource-group RenoPilotWebAppRG \
+            --plan ${{ env.APP_PLAN_NAME }} \
+            --name $WEBAPP_NAME \
+            --deployment-container-image-name nginx \
+            --runtime "DOCKER|nginx" 
+          
+          echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
+          
+          # Add delay to ensure webapp is created
+          sleep 15
+          
+          # Configure environment variables for the web app
+          az webapp config appsettings set \
+            --resource-group RenoPilotWebAppRG \
+            --name $WEBAPP_NAME \
+            --settings \
+            DOCKER_ENV=true \
+            DB_SERVER=shiny.database.windows.net \
+            DB_NAME=Shiny \
+            DB_USER=shiny \
+            DB_DRIVER="ODBC Driver 18 for SQL Server" \
+            DB_PORT=1433 \
+            WEBSITES_PORT=3838 \
+            DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
+          
+          # Make sure container continuous deployment is enabled
+          az webapp config appsettings set \
+            --resource-group RenoPilotWebAppRG \
+            --name $WEBAPP_NAME \
+            --settings \
+            DOCKER_ENABLE_CI=true
+          
+          # Integrate web app with VNet
+          echo "Integrating Web App with VNet..."
+          az webapp vnet-integration add \
+            --name $WEBAPP_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --vnet ${{ env.VNET_NAME }} \
+            --subnet ${{ env.PUBLIC_SUBNET_NAME }}
 
-            # Allow the web app to be accessible from anywhere
-            az webapp config access-restriction remove \
-              --name $WEBAPP_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --rule-name "Allow all" \
-              --action Allow \
-              --ip-address "Any" \
-              --priority 100
-            
-            # Ensure the web app is publicly accessible
-            echo "Ensuring web app is publicly accessible..."
-            az webapp update \
-              --name $WEBAPP_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --https-only false
+          # Allow the web app to be accessible from anywhere
+          az webapp config access-restriction remove \
+            --name $WEBAPP_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --rule-name "Allow all" \
+            --action Allow \
+            --ip-address "Any" \
+            --priority 100
+          
+          # Ensure the web app is publicly accessible
+          echo "Ensuring web app is publicly accessible..."
+          az webapp update \
+            --name $WEBAPP_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --https-only false
     
     - name: Deploy to Azure Web App
       uses: azure/webapps-deploy@v2
