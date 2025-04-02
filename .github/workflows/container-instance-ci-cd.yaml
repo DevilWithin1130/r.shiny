@@ -103,125 +103,59 @@ jobs:
           # Check if a region was specified in workflow dispatch
           PREFERRED_REGION="${{ github.event.inputs.preferred_region }}"
           
-          # Primary regions in order of preference (Australia first, then global fallbacks)
-          REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
-          
-          # Global fallback regions if Australian regions are not available
-          FALLBACK_REGIONS=("eastus" "westus2" "centralus" "westeurope" "northeurope" "southeastasia" "eastasia")
+          # Primary regions to try in order of preference
+          # Australian regions first, then global fallbacks
+          ALL_REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2" 
+                      "eastus" "westus2" "centralus" "eastus2" "northcentralus" "westus" 
+                      "westeurope" "northeurope" "southeastasia" "eastasia" 
+                      "japaneast" "japanwest" "brazilsouth" "canadacentral")
           
           LOCATION=""
           
-          # If a region was specified via workflow_dispatch, try to use it
+          # If a region was manually specified, use it directly
           if [ -n "$PREFERRED_REGION" ]; then
             echo "Using manually specified region: $PREFERRED_REGION"
-            if az container list-skus --location $PREFERRED_REGION --output none 2>/dev/null; then
-              LOCATION=$PREFERRED_REGION
-              echo "Manually specified region $PREFERRED_REGION is available."
-            else
-              echo "WARNING: Manually specified region $PREFERRED_REGION is not available for Container Instances."
-              echo "Will attempt to find an available region automatically."
-            fi
-          fi
-          
-          # Check if Resource Group exists
-          RG_EXISTS=$(az group exists --name RenoPilotContainerRG)
-          
-          if [ "$RG_EXISTS" = "true" ]; then
-            echo "Resource Group already exists."
+            LOCATION=$PREFERRED_REGION
+          else
+            # Check if Resource Group exists
+            RG_EXISTS=$(az group exists --name RenoPilotContainerRG)
             
-            # If no manually specified region or it was unavailable
-            if [ -z "$LOCATION" ]; then
+            if [ "$RG_EXISTS" = "true" ]; then
+              echo "Resource Group already exists."
+              
               # If resource group exists, check if we already have resources deployed
-              EXISTING_CONTAINERS=$(az container list --resource-group RenoPilotContainerRG --query "[].{name:name, location:location}" -o json)
+              EXISTING_CONTAINERS=$(az container list --resource-group RenoPilotContainerRG --query "[].{name:name, location:location}" -o json 2>/dev/null || echo "[]")
               
               # If we have existing containers, use their location
               if [ -n "$EXISTING_CONTAINERS" ] && [ "$EXISTING_CONTAINERS" != "[]" ]; then
                 EXISTING_LOCATION=$(echo $EXISTING_CONTAINERS | jq -r '.[0].location')
-                echo "Using existing resources location: $EXISTING_LOCATION"
-                LOCATION=$EXISTING_LOCATION
-              fi
-            fi
-            
-            # If no valid location found yet, check all regions
-            if [ -z "$LOCATION" ]; then
-              echo "Searching for available region..."
-              
-              # First check Australian regions (preferred)
-              for region in "${REGIONS[@]}"; do
-                echo "Checking Australian region availability: $region"
-                if az container list-skus --location $region --output none 2>/dev/null; then
-                  echo "Found available Australian region: $region"
-                  LOCATION=$region
-                  break
-                else
-                  echo "Australian region $region not available for Container Instances."
+                if [ -n "$EXISTING_LOCATION" ] && [ "$EXISTING_LOCATION" != "null" ]; then
+                  echo "Using existing resources location: $EXISTING_LOCATION"
+                  LOCATION=$EXISTING_LOCATION
                 fi
-              done
-              
-              # If no Australian regions available, try global fallbacks
-              if [ -z "$LOCATION" ]; then
-                echo "No Australian regions available. Checking global fallback regions..."
-                for region in "${FALLBACK_REGIONS[@]}"; do
-                  echo "Checking global region availability: $region"
-                  if az container list-skus --location $region --output none 2>/dev/null; then
-                    echo "Found available global region: $region"
-                    LOCATION=$region
-                    break
-                  else
-                    echo "Global region $region not available for Container Instances."
-                  fi
-                done
               fi
-            fi
-          else
-            echo "Resource Group does not exist. Creating in an available region."
-            
-            # Try Australian regions first (if no manually specified location)
-            if [ -z "$LOCATION" ]; then
-              for region in "${REGIONS[@]}"; do
-                echo "Checking Australian region availability: $region"
-                if az container list-skus --location $region --output none 2>/dev/null; then
-                  echo "Found available Australian region: $region"
-                  LOCATION=$region
-                  break
-                else
-                  echo "Australian region $region not available for Container Instances."
-                fi
-              done
-              
-              # If no Australian regions available, try global fallbacks
-              if [ -z "$LOCATION" ]; then
-                echo "No Australian regions available. Checking global fallback regions..."
-                for region in "${FALLBACK_REGIONS[@]}"; do
-                  echo "Checking global region availability: $region"
-                  if az container list-skus --location $region --output none 2>/dev/null; then
-                    echo "Found available global region: $region"
-                    LOCATION=$region
-                    break
-                  else
-                    echo "Global region $region not available for Container Instances."
-                  fi
-                done
-              fi
-            fi
-            
-            # Create resource group in chosen region
-            if [ -n "$LOCATION" ]; then
-              az group create --name RenoPilotContainerRG --location $LOCATION
             fi
           fi
           
-          # If still no region was found
+          # If no location found yet, use default region and skip availability check
           if [ -z "$LOCATION" ]; then
-            echo "ERROR: Could not find any available region for Container Instances."
-            echo "Please check Azure service availability or contact Azure support."
-            exit 1
+            echo "No existing location found - will try to create in first available region"
+            
+            # Print diagnostic information about available regions
+            echo "Listing available Azure regions for reference:"
+            az account list-locations --query "[].name" -o tsv
+            
+            echo "Will attempt direct deployment without availability check"
           fi
           
-          echo "Using region: $LOCATION"
-          
-          # Store location for use in later steps
-          echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
+          # Store location for use in later steps (use default if not set)
+          if [ -n "$LOCATION" ]; then
+            echo "Selected region: $LOCATION"
+            echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
+          else
+            echo "No specific region set - will be determined during creation"
+            echo "AZURE_LOCATION=eastus" >> $GITHUB_ENV  # Default as placeholder
+          fi
           
           # Generate a timestamp for unique resource names
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
@@ -540,105 +474,123 @@ jobs:
           # Store firewall name for later steps
           echo "PRIVATE_FW_NAME=$PRIVATE_FW_NAME" >> $GITHUB_ENV
 
-    - name: Deploy Container Instance with SKU fallback
+    - name: Deploy Container Instance with Direct Creation
       uses: azure/cli@v1
       with:
         inlineScript: |
+          # Get specified location if available
           LOCATION="${{ env.AZURE_LOCATION }}"
-          CONTAINER_NAME="renopilot-container-$LOCATION"
+          CONTAINER_NAME="renopilot-container"
           
-          # Check if Container Instance already exists
-          if az container show --name $CONTAINER_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
-            echo "Container Instance '$CONTAINER_NAME' already exists. Updating with new image..."
+          # List of regions to try in priority order (if no specific region was set)
+          if [ "$LOCATION" == "eastus" ] && [ -z "${{ github.event.inputs.preferred_region }}" ]; then
+            REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "eastus" "westus2" "centralus" "westeurope" "southeastasia")
+            echo "No specific region was determined earlier. Will try regions in sequence."
             
-            # Update existing container with new image
-            az container create \
-              --name $CONTAINER_NAME \
-              --resource-group RenoPilotContainerRG \
-              --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA || github.sha }} \
-              --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
-              --registry-username ${{ env.ACR_USERNAME }} \
-              --registry-password ${{ env.ACR_PASSWORD }} \
-              --os-type Linux \
-              --replace
+            for region in "${REGIONS[@]}"; do
+              echo "Attempting to create container in: $region"
+              REGION_CONTAINER_NAME="${CONTAINER_NAME}-${region}"
+              
+              if az container create \
+                --name $REGION_CONTAINER_NAME \
+                --resource-group RenoPilotContainerRG \
+                --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA || github.sha }} \
+                --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
+                --registry-username ${{ env.ACR_USERNAME }} \
+                --registry-password ${{ env.ACR_PASSWORD }} \
+                --os-type Linux \
+                --cpu 1 \
+                --memory 1 \
+                --ports 3838 \
+                --ip-address Public \
+                --dns-name-label ${CONTAINER_NAME}-${region} \
+                --environment-variables \
+                  DB_SERVER=shiny.database.windows.net \
+                  DB_NAME=Shiny \
+                  DB_USER=shiny \
+                  DB_DRIVER="ODBC Driver 18 for SQL Server" \
+                  DB_PORT=1433 \
+                --secure-environment-variables \
+                  DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+                --location $region 2>/dev/null; then
+                
+                echo "Container successfully created in $region!"
+                echo "AZURE_LOCATION=$region" >> $GITHUB_ENV
+                echo "CONTAINER_NAME=$REGION_CONTAINER_NAME" >> $GITHUB_ENV
+                break
+              else
+                echo "Failed to create container in $region, trying next region..."
+              fi
+            done
           else
-            echo "Creating new Container Instance '$CONTAINER_NAME'..."
+            # Use specific region that was determined earlier
+            REGION_CONTAINER_NAME="${CONTAINER_NAME}-${LOCATION}"
+            echo "Using specific region: $LOCATION"
             
-            # Try different CPU/Memory configurations if facing quota issues
+            # Try creation with different SKUs if needed
             CONFIGS=(
-              "2 4"    # 2 CPU cores, 4GB memory
               "1 2"    # 1 CPU core, 2GB memory
+              "1 1"    # 1 CPU core, 1GB memory
               "0.5 1"  # 0.5 CPU cores, 1GB memory
             )
             
-            MAX_RETRIES=3
-            CREATION_SUCCESS=false
-            
-            # Try different configurations with retries
             for CONFIG in "${CONFIGS[@]}"; do
               read -r CPU MEMORY <<< "$CONFIG"
-              echo "Attempting to create Container Instance with: $CPU CPU, $MEMORY GB memory"
+              echo "Attempting with: $CPU CPU, $MEMORY GB memory in $LOCATION"
               
-              for ((i=1; i<=MAX_RETRIES; i++)); do
-                echo "Attempt $i of $MAX_RETRIES..."
+              if az container create \
+                --name $REGION_CONTAINER_NAME \
+                --resource-group RenoPilotContainerRG \
+                --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA || github.sha }} \
+                --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
+                --registry-username ${{ env.ACR_USERNAME }} \
+                --registry-password ${{ env.ACR_PASSWORD }} \
+                --os-type Linux \
+                --cpu $CPU \
+                --memory $MEMORY \
+                --ports 3838 \
+                --ip-address Public \
+                --dns-name-label ${CONTAINER_NAME}-${LOCATION} \
+                --environment-variables \
+                  DB_SERVER=shiny.database.windows.net \
+                  DB_NAME=Shiny \
+                  DB_USER=shiny \
+                  DB_DRIVER="ODBC Driver 18 for SQL Server" \
+                  DB_PORT=1433 \
+                --secure-environment-variables \
+                  DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+                --location $LOCATION; then
                 
-                if az container create \
-                  --name $CONTAINER_NAME \
-                  --resource-group RenoPilotContainerRG \
-                  --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }} \
-                  --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
-                  --registry-username ${{ env.ACR_USERNAME }} \
-                  --registry-password ${{ env.ACR_PASSWORD }} \
-                  --os-type Linux \
-                  --cpu $CPU \
-                  --memory $MEMORY \
-                  --ports 3838 \
-                  --ip-address Public \
-                  --dns-name-label ${CONTAINER_NAME}-${LOCATION} \
-                  --environment-variables \
-                    DB_SERVER=shiny.database.windows.net \
-                    DB_NAME=Shiny \
-                    DB_USER=shiny \
-                    DB_DRIVER="ODBC Driver 18 for SQL Server" \
-                    DB_PORT=1433 \
-                  --secure-environment-variables \
-                    DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
-                  --location $LOCATION; then
-                  
-                  echo "Container Instance created successfully with $CPU CPU, $MEMORY GB memory!"
-                  echo "CONTAINER_NAME=$CONTAINER_NAME" >> $GITHUB_ENV
-                  echo "CONTAINER_CPU=$CPU" >> $GITHUB_ENV
-                  echo "CONTAINER_MEMORY=$MEMORY" >> $GITHUB_ENV
-                  CREATION_SUCCESS=true
-                  break 2  # Break out of both loops
-                else
-                  echo "Failed to create Container Instance with $CPU CPU, $MEMORY GB memory. Waiting before retry..."
-                  if [ $i -lt $MAX_RETRIES ]; then
-                    # Exponential backoff - wait longer with each retry
-                    SLEEP_TIME=$((20 * i))
-                    echo "Waiting for $SLEEP_TIME seconds before next attempt..."
-                    sleep $SLEEP_TIME
-                  fi
-                fi
-              done
+                echo "Container successfully created in $LOCATION with $CPU CPU, $MEMORY GB memory!"
+                echo "CONTAINER_NAME=$REGION_CONTAINER_NAME" >> $GITHUB_ENV
+                break
+              else
+                echo "Failed with $CPU CPU, $MEMORY GB memory. Trying next configuration..."
+              fi
             done
-            
-            # Check if we succeeded with any configuration
-            if [ "$CREATION_SUCCESS" != "true" ]; then
-              echo "ERROR: All attempts to create Container Instance failed."
-              echo "Please check your Azure subscription quota limits and try again."
-              exit 1
-            fi
+          fi
+          
+          # Check if container was successfully created
+          if ! az container show --name ${CONTAINER_NAME}-* --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "ERROR: Failed to create container in any region. Please check your Azure subscription."
+            echo "You may need to manually create the container through the Azure Portal."
+            exit 1
           fi
           
           # Display the container IP and URL
-          echo "Getting Container Instance details..."
-          CONTAINER_IP=$(az container show --name $CONTAINER_NAME --resource-group RenoPilotContainerRG --query ipAddress.ip --output tsv 2>/dev/null || echo "IP not available")
-          if [ "$CONTAINER_IP" != "IP not available" ] && [ -n "$CONTAINER_IP" ]; then
-            echo "Container deployed successfully at IP: $CONTAINER_IP"
-            echo "Shiny app should be accessible at: http://$CONTAINER_IP:3838"
-          else
-            echo "Container IP address not available yet. It may take a few minutes to initialize."
+          FOUND_CONTAINERS=$(az container list --resource-group RenoPilotContainerRG --query "[?starts_with(name,'${CONTAINER_NAME}')].{name:name, ip:ipAddress.ip, fqdn:ipAddress.fqdn}" -o json)
+          echo "Container instances found: $FOUND_CONTAINERS"
+          
+          if [ -n "$FOUND_CONTAINERS" ] && [ "$FOUND_CONTAINERS" != "[]" ]; then
+            CONTAINER_IP=$(echo $FOUND_CONTAINERS | jq -r '.[0].ip')
+            CONTAINER_FQDN=$(echo $FOUND_CONTAINERS | jq -r '.[0].fqdn')
+            CREATED_NAME=$(echo $FOUND_CONTAINERS | jq -r '.[0].name')
+            
+            echo "Container deployed successfully: $CREATED_NAME"
+            [ -n "$CONTAINER_IP" ] && [ "$CONTAINER_IP" != "null" ] && echo "IP Address: $CONTAINER_IP"
+            [ -n "$CONTAINER_FQDN" ] && [ "$CONTAINER_FQDN" != "null" ] && echo "FQDN: $CONTAINER_FQDN"
+            echo "Shiny app should be accessible at: http://${CONTAINER_IP}:3838 (if IP is available)"
+          fi
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
