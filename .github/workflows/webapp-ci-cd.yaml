@@ -139,9 +139,23 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Create Resource Group
-          echo "Creating Resource Group..."
-          az group create --name RenoPilotWebAppRG --location australiacentral
+          # Check if Resource Group exists and get its location
+          echo "Checking Resource Group..."
+          RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
+          
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "Resource Group already exists. Getting its location..."
+            LOCATION=$(az group show --name RenoPilotWebAppRG --query location -o tsv)
+            echo "Using existing resource group location: $LOCATION"
+          else
+            # Default location if creating new resource group
+            LOCATION="australiaeast"
+            echo "Creating Resource Group in $LOCATION..."
+            az group create --name RenoPilotWebAppRG --location $LOCATION
+          fi
+          
+          # Store location for use in later steps
+          echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
           
           # Verify resource group was created
           echo "Verifying Resource Group creation..."
@@ -159,7 +173,7 @@ jobs:
           az network vnet create \
             --name renopilot-webapp-vpc \
             --resource-group RenoPilotWebAppRG \
-            --location australiacentral \
+            --location $LOCATION \
             --address-prefix 10.1.0.0/16
           
           # Verify VNet was created
@@ -195,7 +209,7 @@ jobs:
           az network nsg create \
             --name webapp-public-nsg \
             --resource-group RenoPilotWebAppRG \
-            --location australiacentral
+            --location ${{ env.AZURE_LOCATION }}
             
           # Apply NSG to the subnet
           az network vnet subnet update \
@@ -213,20 +227,20 @@ jobs:
           az network firewall create \
             --name webapp-publicfw \
             --resource-group RenoPilotWebAppRG \
-            --location australiacentral
+            --location ${{ env.AZURE_LOCATION }}
             
           # Create Private Firewall
           az network firewall create \
             --name webapp-privatefw \
             --resource-group RenoPilotWebAppRG \
-            --location australiacentral
+            --location ${{ env.AZURE_LOCATION }}
           
           # Create a route table for the subnet
           echo "Creating route table for public subnet..."
           az network route-table create \
             --name webapp-public-routes \
             --resource-group RenoPilotWebAppRG \
-            --location australiacentral
+            --location ${{ env.AZURE_LOCATION }}
           
           # Add the route table to the subnet
           az network vnet subnet update \
@@ -248,7 +262,7 @@ jobs:
             --resource-group RenoPilotWebAppRG \
             --name $ACR_NAME \
             --sku Standard \
-            --location australiacentral \
+            --location ${{ env.AZURE_LOCATION }} \
             --admin-enabled true  # Enables admin authentication for testing, consider disabling in production
           
           # Retrieve and store registry credentials securely in GitHub environment
@@ -282,7 +296,7 @@ jobs:
             --resource-group RenoPilotWebAppRG \
             --is-linux \
             --sku B1 \
-            --location australiacentral
+            --location ${{ env.AZURE_LOCATION }}
 
     - name: Create Web App
       uses: azure/cli@v1

@@ -1,3 +1,4 @@
+
 name: RenoPilot Container Instance CI/CD
 
 on: 
@@ -98,7 +99,6 @@ jobs:
               done
             fi
           done
-
     - name: Check and Clean Existing Infrastructure
       uses: azure/cli@v1
       with:
@@ -130,7 +130,6 @@ jobs:
           else
             echo "No existing infrastructure found. Proceeding with fresh deployment."
           fi
-
     - name: Create VPC and Subnets
       uses: azure/cli@v1
       with:
@@ -208,7 +207,6 @@ jobs:
             --vnet-name renopilot-container-vpc \
             --resource-group RenoPilotContainerRG \
             --network-security-group container-public-nsg
-
     - name: Deploy Firewalls
       uses: azure/cli@v1
       with:
@@ -219,13 +217,11 @@ jobs:
             --name container-publicfw \
             --resource-group RenoPilotContainerRG \
             --location australiaeast
-
           # Create Private Firewall
           az network firewall create \
             --name container-privatefw \
             --resource-group RenoPilotContainerRG \
             --location australiaeast
-
     - name: Deploy Container Registry
       uses: azure/cli@v1
       with:
@@ -253,7 +249,6 @@ jobs:
           echo "ACR_PASSWORD=$ACR_PASSWORD" >> $GITHUB_ENV
           # Add mask to hide sensitive output in logs
           echo "::add-mask::$ACR_PASSWORD"
-
     - name: Build and push image
       uses: azure/docker-login@v1
       with:
@@ -263,29 +258,22 @@ jobs:
     - run: |
         docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
         docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
-
     - name: Deploy to Azure Container Instances
-      uses: azure/cli@v1
+      uses: azure/aci-deploy@v1
       with:
-        inlineScript: |
-          # Properly escape the password by storing it in a variable with single quotes
-          DB_PWD='${{ secrets.DB_PASSWORD }}'
-          
-          # Create container without subnet integration
-          echo "Creating production container instance..."
-          az container create \
-            --resource-group RenoPilotContainerRG \
-            --name renopilotfenceappinstance \
-            --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
-            --os-type Linux \
-            --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
-            --registry-username ${{ env.ACR_USERNAME }} \
-            --registry-password ${{ env.ACR_PASSWORD }} \
-            --dns-name-label renopilot-container-${{ github.run_number }} \
-            --ports 80 3838 \
-            --environment-variables DOCKER_ENV=true DB_SERVER=shiny.database.windows.net DB_NAME=Shiny DB_USER=shiny DB_DRIVER="ODBC Driver 18 for SQL Server" DB_PORT=1433 \
-            --secure-environment-variables DB_PASSWORD="$DB_PWD" \
-            --location australiaeast
+        resource-group: RenoPilotContainerRG
+        dns-name-label: renopilot-container-${{ github.run_number }}
+        image: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+        registry-login-server: ${{ env.ACR_LOGIN_SERVER }}
+        registry-username: ${{ env.ACR_USERNAME }}
+        registry-password: ${{ env.ACR_PASSWORD }}
+        name: renopilotfenceappinstance
+        location: australiaeast
+        vnet: renopilot-container-vpc
+        subnet: ContainerPublicSubnet
+        ports: 80 3838
+        environment-variables: DOCKER_ENV=true DB_SERVER=shiny.database.windows.net DB_NAME=Shiny DB_USER=shiny DB_DRIVER="ODBC Driver 18 for SQL Server" DB_PORT=1433
+        secure-environment-variables: DB_PASSWORD=${{ secrets.DB_PASSWORD }}
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
