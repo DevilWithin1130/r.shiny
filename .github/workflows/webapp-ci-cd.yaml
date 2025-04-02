@@ -293,7 +293,7 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          LOCATION="australiacentral"
+          LOCATION="${{ env.AZURE_LOCATION }}"
           # Create NSG with region-specific name
           NSG_NAME="webapp-nsg-$LOCATION"
           echo "Creating Network Security Group '$NSG_NAME'..."
@@ -460,6 +460,7 @@ jobs:
                 
                 echo "App Service Plan created successfully with SKU $SKU!"
                 echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+                echo "APP_SKU=$SKU" >> $GITHUB_ENV
                 echo "APP_PLAN_SUCCESS=true" >> $GITHUB_ENV
                 break 2  # Break out of both loops
               else
@@ -481,7 +482,7 @@ jobs:
             exit 1
           fi
 
-    - name: Create Web App
+    - name: Create Web App and Configure
       uses: azure/cli@v1
       with:
         inlineScript: |
@@ -490,12 +491,13 @@ jobs:
           WEBAPP_NAME="renopilot-webapp-$LOCATION"
           echo "Creating Web App '$WEBAPP_NAME'..."
           
-          # Create the web app
+          # Create the web app without the image (we'll deploy separately)
           az webapp create \
             --resource-group RenoPilotWebAppRG \
             --plan ${{ env.APP_PLAN_NAME }} \
             --name $WEBAPP_NAME \
-            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+            --deployment-container-image-name nginx \
+            --runtime "DOCKER|nginx" 
           
           echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
           
@@ -516,30 +518,12 @@ jobs:
             WEBSITES_PORT=3838 \
             DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
           
-          # Configure the container settings
-          az webapp config container set \
-            --name $WEBAPP_NAME \
-            --resource-group RenoPilotWebAppRG \
-            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
-            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }} \
-            --container-registry-user ${{ env.ACR_USERNAME }} \
-            --container-registry-password ${{ env.ACR_PASSWORD }}
-            
-          # Explicitly set the ports for the web app and ensure WEBSITES_PORT is set to 3838
+          # Make sure container continuous deployment is enabled
           az webapp config appsettings set \
             --resource-group RenoPilotWebAppRG \
             --name $WEBAPP_NAME \
             --settings \
-            WEBSITES_PORT=3838
-          
-          # Configure container port mapping explicitly
-          echo "Configuring port mapping for the container..."
-          az webapp config container set \
-            --name $WEBAPP_NAME \
-            --resource-group RenoPilotWebAppRG \
-            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
-            --enable-app-service-storage false \
-            --port 3838
+            DOCKER_ENABLE_CI=true
           
           # Integrate web app with VNet
           echo "Integrating Web App with VNet..."
@@ -564,6 +548,45 @@ jobs:
             --name $WEBAPP_NAME \
             --resource-group RenoPilotWebAppRG \
             --https-only false
+    
+    - name: Deploy to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ env.WEBAPP_NAME }}
+        images: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+        slot-name: 'production'
+
+    - name: Configure Container Settings
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Configure container settings after deployment
+          echo "Configuring container settings after deployment..."
+          az webapp config container set \
+            --name ${{ env.WEBAPP_NAME }} \
+            --resource-group RenoPilotWebAppRG \
+            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
+            --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
+            --docker-registry-server-user ${{ env.ACR_USERNAME }} \
+            --docker-registry-server-password ${{ env.ACR_PASSWORD }} \
+            --enable-app-service-storage false
+          
+          # Explicitly set port mapping
+          echo "Setting port mapping to 3838..."
+          az webapp config appsettings set \
+            --resource-group RenoPilotWebAppRG \
+            --name ${{ env.WEBAPP_NAME }} \
+            --settings \
+            WEBSITES_PORT=3838
+          
+          # Ensure container is restarted to apply settings
+          echo "Restarting web app to apply configuration..."
+          az webapp restart --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG
+          
+          # Display the web app URL
+          WEBAPP_URL=$(az webapp show --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG --query "defaultHostName" -o tsv)
+          echo "Web app deployed successfully at: https://$WEBAPP_URL"
+          echo "Shiny app should be accessible at: https://$WEBAPP_URL"
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
