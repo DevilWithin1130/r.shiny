@@ -145,12 +145,27 @@ jobs:
           echo "Deleting Azure Container Registry..."
           az acr delete --name renopilotwebappreg --resource-group RenoPilotWebAppRG --yes || true
           
-          # 4. Delete Firewalls
+          # 4. Check and delete existing NSG in any region
+          echo "Checking for Network Security Group in any region..."
+          if az network nsg show --name webapp-public-nsg --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Deleting existing Network Security Group..."
+            az network nsg delete --name webapp-public-nsg --resource-group RenoPilotWebAppRG || true
+            sleep 30
+          fi
+          
+          # 5. Delete Firewalls
           echo "Deleting Firewalls..."
           az network firewall delete --name webapp-publicfw --resource-group RenoPilotWebAppRG || true
           az network firewall delete --name webapp-privatefw --resource-group RenoPilotWebAppRG || true
           
-          # 5. Delete VNet and subnets
+          # 6. Delete Route Table
+          echo "Deleting Route Table..."
+          if az network route-table show --name webapp-public-routes --resource-group RenoPilotWebAppRG &>/dev/null; then
+            az network route-table delete --name webapp-public-routes --resource-group RenoPilotWebAppRG || true
+            sleep 20
+          fi
+          
+          # 7. Delete VNet and subnets
           echo "Deleting VNet and subnets..."
           az network vnet delete --name renopilot-webapp-vpc --resource-group RenoPilotWebAppRG || true
           
@@ -167,6 +182,10 @@ jobs:
           
           # Store location for use in later steps
           echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
+          
+          # Generate a timestamp for unique resource names
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           
           # Check if Resource Group exists
           RG_EXISTS=$(az group exists --name RenoPilotWebAppRG)
@@ -188,113 +207,150 @@ jobs:
           echo "Waiting for resource group to be fully provisioned..."
           sleep 15
           
-          # VNet with /16 CIDR block allowing up to 65,536 IP addresses
-          echo "Creating VNet..."
+          # Create VNet with region-specific name
+          VNET_NAME="renopilot-vpc-$LOCATION"
+          echo "Creating VNet '$VNET_NAME'..."
           az network vnet create \
-            --name renopilot-webapp-vpc \
+            --name $VNET_NAME \
             --resource-group RenoPilotWebAppRG \
             --location $LOCATION \
             --address-prefix 10.1.0.0/16
           
           # Verify VNet was created
-          if ! az network vnet show --name renopilot-webapp-vpc --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Error: VNet renopilot-webapp-vpc was not created successfully."
+          if ! az network vnet show --name $VNET_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Error: VNet $VNET_NAME was not created successfully."
             exit 1
           fi
+          
+          # Store VNet name for later steps
+          echo "VNET_NAME=$VNET_NAME" >> $GITHUB_ENV
           
           # Add delay to ensure VNet is fully provisioned
           sleep 10
           
-          # Public subnet with /24 CIDR block allowing up to 256 IP addresses
-          echo "Creating Public Subnet..."
+          # Public subnet with region-specific name
+          PUBLIC_SUBNET_NAME="WebAppPublicSubnet-$LOCATION"
+          echo "Creating Public Subnet '$PUBLIC_SUBNET_NAME'..."
           az network vnet subnet create \
-            --name WebAppPublicSubnet \
-            --vnet-name renopilot-webapp-vpc \
+            --name $PUBLIC_SUBNET_NAME \
+            --vnet-name $VNET_NAME \
             --resource-group RenoPilotWebAppRG \
             --address-prefix 10.1.1.0/24 \
             --delegations Microsoft.Web/serverFarms \
             --service-endpoints Microsoft.Web
           
+          # Store subnet name for later steps
+          echo "PUBLIC_SUBNET_NAME=$PUBLIC_SUBNET_NAME" >> $GITHUB_ENV
+          
           # Add delay to ensure subnet is fully provisioned
           sleep 10
           
-          # Private subnet for sensitive resources with /24 CIDR block
-          echo "Creating Private Subnet..."
+          # Private subnet with region-specific name
+          PRIVATE_SUBNET_NAME="WebAppPrivateSubnet-$LOCATION"
+          echo "Creating Private Subnet '$PRIVATE_SUBNET_NAME'..."
           az network vnet subnet create \
-            --name WebAppPrivateSubnet \
-            --vnet-name renopilot-webapp-vpc \
+            --name $PRIVATE_SUBNET_NAME \
+            --vnet-name $VNET_NAME \
             --resource-group RenoPilotWebAppRG \
             --address-prefix 10.1.2.0/24
+          
+          # Store subnet name for later steps
+          echo "PRIVATE_SUBNET_NAME=$PRIVATE_SUBNET_NAME" >> $GITHUB_ENV
 
     - name: Deploy Network Security Groups
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Create NSG for public subnet
+          LOCATION="australiacentral"
+          # Create NSG with region-specific name
+          NSG_NAME="webapp-nsg-$LOCATION"
+          echo "Creating Network Security Group '$NSG_NAME'..."
           az network nsg create \
-            --name webapp-public-nsg \
+            --name $NSG_NAME \
             --resource-group RenoPilotWebAppRG \
-            --location ${{ env.AZURE_LOCATION }}
+            --location $LOCATION
+          
+          # Store NSG name for later steps
+          echo "NSG_NAME=$NSG_NAME" >> $GITHUB_ENV
             
           # Apply NSG to the subnet
+          echo "Applying NSG to subnet..."
           az network vnet subnet update \
-            --name WebAppPublicSubnet \
-            --vnet-name renopilot-webapp-vpc \
+            --name ${{ env.PUBLIC_SUBNET_NAME }} \
+            --vnet-name ${{ env.VNET_NAME }} \
             --resource-group RenoPilotWebAppRG \
-            --network-security-group webapp-public-nsg
+            --network-security-group $NSG_NAME
 
     - name: Deploy Firewalls
       uses: azure/cli@v1
       with:
         inlineScript: |
+          LOCATION="australiacentral"
           echo "Creating Firewalls..."
-          # Create Public Firewall
-          az network firewall create \
-            --name webapp-publicfw \
-            --resource-group RenoPilotWebAppRG \
-            --location ${{ env.AZURE_LOCATION }}
-            
-          # Create Private Firewall
-          az network firewall create \
-            --name webapp-privatefw \
-            --resource-group RenoPilotWebAppRG \
-            --location ${{ env.AZURE_LOCATION }}
           
-          # Create a route table for the subnet
-          echo "Creating route table for public subnet..."
-          az network route-table create \
-            --name webapp-public-routes \
+          # Create Public Firewall with region-specific name
+          PUBLIC_FW_NAME="webapp-publicfw-$LOCATION"
+          echo "Creating Public Firewall '$PUBLIC_FW_NAME'..."
+          az network firewall create \
+            --name $PUBLIC_FW_NAME \
             --resource-group RenoPilotWebAppRG \
-            --location ${{ env.AZURE_LOCATION }}
+            --location $LOCATION
+          
+          # Store firewall name for later steps
+          echo "PUBLIC_FW_NAME=$PUBLIC_FW_NAME" >> $GITHUB_ENV
+            
+          # Create Private Firewall with region-specific name
+          PRIVATE_FW_NAME="webapp-privatefw-$LOCATION"
+          echo "Creating Private Firewall '$PRIVATE_FW_NAME'..."
+          az network firewall create \
+            --name $PRIVATE_FW_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --location $LOCATION
+          
+          # Store firewall name for later steps
+          echo "PRIVATE_FW_NAME=$PRIVATE_FW_NAME" >> $GITHUB_ENV
+          
+          # Create a route table for the subnet with region-specific name
+          ROUTE_TABLE_NAME="webapp-routes-$LOCATION"
+          echo "Creating route table '$ROUTE_TABLE_NAME'..."
+          az network route-table create \
+            --name $ROUTE_TABLE_NAME \
+            --resource-group RenoPilotWebAppRG \
+            --location $LOCATION
+          
+          # Store route table name for later steps
+          echo "ROUTE_TABLE_NAME=$ROUTE_TABLE_NAME" >> $GITHUB_ENV
           
           # Add the route table to the subnet
+          echo "Applying route table to subnet..."
           az network vnet subnet update \
-            --name WebAppPublicSubnet \
-            --vnet-name renopilot-webapp-vpc \
+            --name ${{ env.PUBLIC_SUBNET_NAME }} \
+            --vnet-name ${{ env.VNET_NAME }} \
             --resource-group RenoPilotWebAppRG \
-            --route-table webapp-public-routes
+            --route-table $ROUTE_TABLE_NAME
 
     - name: Deploy Container Registry
       uses: azure/cli@v1
       with:
         inlineScript: |
-          ACR_NAME="renopilotwebappreg"
-          # Using Standard SKU instead of Premium to avoid quota issues:
-          # - Still provides good performance
-          # - Sufficient for development and testing
-          # - More widely available in regions
+          LOCATION="australiacentral"
+          # Use a unique ACR name that includes location (ACR names must be globally unique)
+          ACR_NAME="renopilot${LOCATION}reg"
+          echo "Creating Container Registry '$ACR_NAME'..."
+          
           az acr create \
             --resource-group RenoPilotWebAppRG \
             --name $ACR_NAME \
             --sku Standard \
-            --location ${{ env.AZURE_LOCATION }} \
-            --admin-enabled true  # Enables admin authentication for testing, consider disabling in production
+            --location $LOCATION \
+            --admin-enabled true
           
           # Retrieve and store registry credentials securely in GitHub environment
           ACR_LOGIN_SERVER=$(az acr show -n $ACR_NAME --query loginServer -o tsv)
           ACR_USERNAME=$(az acr credential show -n $ACR_NAME --query username -o tsv)
           ACR_PASSWORD=$(az acr credential show -n $ACR_NAME --query "passwords[0].value" -o tsv)
           
+          echo "ACR_NAME=$ACR_NAME" >> $GITHUB_ENV
           echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
           echo "ACR_USERNAME=$ACR_USERNAME" >> $GITHUB_ENV
           echo "ACR_PASSWORD=$ACR_PASSWORD" >> $GITHUB_ENV
@@ -315,21 +371,25 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Create a Basic tier App Service plan with retry logic
+          # Create App Service Plan with region-specific name
           LOCATION="australiacentral"
+          APP_PLAN_NAME="renopilot-plan-$LOCATION"
+          echo "Creating App Service Plan '$APP_PLAN_NAME'..."
+          
           MAX_RETRIES=3
           
           for ((i=1; i<=MAX_RETRIES; i++)); do
             echo "Attempt $i of $MAX_RETRIES to create App Service Plan..."
             
             if az appservice plan create \
-              --name renopilot-plan \
+              --name $APP_PLAN_NAME \
               --resource-group RenoPilotWebAppRG \
               --is-linux \
               --sku B1 \
               --location $LOCATION; then
               
               echo "App Service Plan created successfully!"
+              echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
               break
             else
               echo "Failed to create App Service Plan. Waiting before retry..."
@@ -346,8 +406,8 @@ jobs:
           done
           
           # Verify App Service Plan exists
-          if ! az appservice plan show --name renopilot-plan --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "Error: App Service Plan renopilot-plan was not created successfully."
+          if ! az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
+            echo "Error: App Service Plan $APP_PLAN_NAME was not created successfully."
             exit 1
           fi
 
@@ -356,14 +416,18 @@ jobs:
       with:
         inlineScript: |
           LOCATION="australiacentral"
+          # Create Web App with region-specific name
+          WEBAPP_NAME="renopilot-webapp-$LOCATION"
+          echo "Creating Web App '$WEBAPP_NAME'..."
           
-          # Create a web app that uses the container image
-          echo "Creating Web App..."
+          # Create the web app
           az webapp create \
             --resource-group RenoPilotWebAppRG \
-            --plan renopilot-plan \
-            --name renopilot-webapp \
+            --plan ${{ env.APP_PLAN_NAME }} \
+            --name $WEBAPP_NAME \
             --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+          
+          echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
           
           # Add delay to ensure webapp is created
           sleep 15
@@ -371,7 +435,7 @@ jobs:
           # Configure environment variables for the web app
           az webapp config appsettings set \
             --resource-group RenoPilotWebAppRG \
-            --name renopilot-webapp \
+            --name $WEBAPP_NAME \
             --settings \
             DOCKER_ENV=true \
             DB_SERVER=shiny.database.windows.net \
@@ -382,9 +446,9 @@ jobs:
             WEBSITES_PORT=3838 \
             DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
           
-          # Configure the container settings using newer parameter names
+          # Configure the container settings
           az webapp config container set \
-            --name renopilot-webapp \
+            --name $WEBAPP_NAME \
             --resource-group RenoPilotWebAppRG \
             --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
             --container-registry-url https://${{ env.ACR_LOGIN_SERVER }} \
@@ -394,21 +458,21 @@ jobs:
           # Configure the ports for the web app
           az webapp config appsettings set \
             --resource-group RenoPilotWebAppRG \
-            --name renopilot-webapp \
+            --name $WEBAPP_NAME \
             --settings \
             WEBSITES_PORT=3838
           
-          # Integrate web app with VNet (public subnet)
+          # Integrate web app with VNet
           echo "Integrating Web App with VNet..."
           az webapp vnet-integration add \
-            --name renopilot-webapp \
+            --name $WEBAPP_NAME \
             --resource-group RenoPilotWebAppRG \
-            --vnet renopilot-webapp-vpc \
-            --subnet WebAppPublicSubnet
+            --vnet ${{ env.VNET_NAME }} \
+            --subnet ${{ env.PUBLIC_SUBNET_NAME }}
 
           # Allow the web app to be accessible from anywhere
           az webapp config access-restriction remove \
-            --name renopilot-webapp \
+            --name $WEBAPP_NAME \
             --resource-group RenoPilotWebAppRG \
             --rule-name "Allow all" \
             --action Allow \
@@ -419,13 +483,13 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Create rule collections first
+          # Create rule collections for the region-specific firewalls
           echo "Creating firewall rule collections..."
           az network firewall network-rule create \
             --collection-name sqltraffic \
             --name SQLRule \
             --destination-ports 1433 \
-            --firewall-name webapp-privatefw \
+            --firewall-name ${{ env.PRIVATE_FW_NAME }} \
             --protocols TCP \
             --resource-group RenoPilotWebAppRG \
             --source-addresses 10.1.1.0/24 \
@@ -438,7 +502,7 @@ jobs:
             --collection-name dockertraffic \
             --name DockerRule \
             --destination-ports 5000 \
-            --firewall-name webapp-privatefw \
+            --firewall-name ${{ env.PRIVATE_FW_NAME }} \
             --protocols TCP \
             --resource-group RenoPilotWebAppRG \
             --source-addresses 10.1.1.0/24 \
@@ -451,7 +515,7 @@ jobs:
             --collection-name webtraffic \
             --name HTTPRule \
             --destination-ports 80 \
-            --firewall-name webapp-publicfw \
+            --firewall-name ${{ env.PUBLIC_FW_NAME }} \
             --protocols TCP \
             --resource-group RenoPilotWebAppRG \
             --source-addresses "*" \
@@ -464,7 +528,7 @@ jobs:
             --collection-name shinytraffic \
             --name ShinyRule \
             --destination-ports 3838 \
-            --firewall-name webapp-publicfw \
+            --firewall-name ${{ env.PUBLIC_FW_NAME }} \
             --protocols TCP \
             --resource-group RenoPilotWebAppRG \
             --source-addresses "*" \
@@ -474,7 +538,7 @@ jobs:
           
           # Configure Azure SQL Server firewall rules
           echo "Configuring Azure SQL Server firewall rules..."
-          SUBNET_ADDRESS_PREFIX=$(az network vnet subnet show --resource-group RenoPilotWebAppRG --vnet-name renopilot-webapp-vpc --name WebAppPublicSubnet --query addressPrefix -o tsv)
+          SUBNET_ADDRESS_PREFIX=$(az network vnet subnet show --resource-group RenoPilotWebAppRG --vnet-name ${{ env.VNET_NAME }} --name ${{ env.PUBLIC_SUBNET_NAME }} --query addressPrefix -o tsv)
           
           # Only try to create the firewall rule if the subnet was found
           if [ -n "$SUBNET_ADDRESS_PREFIX" ]; then
