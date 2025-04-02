@@ -411,6 +411,8 @@ jobs:
                   --cpu $CPU \
                   --memory $MEMORY \
                   --ports 3838 \
+                  --ip-address Public \
+                  --dns-name-label ${CONTAINER_NAME}-${LOCATION} \
                   --environment-variables \
                     DB_SERVER=shiny.database.windows.net \
                     DB_NAME=Shiny \
@@ -419,8 +421,6 @@ jobs:
                     DB_PORT=1433 \
                   --secure-environment-variables \
                     DB_PASSWORD="${{ secrets.DB_PASSWORD }}" \
-                  --vnet ${{ env.VNET_NAME }} \
-                  --subnet ${{ env.SUBNET_NAME }} \
                   --location $LOCATION; then
                   
                   echo "Container Instance created successfully with $CPU CPU, $MEMORY GB memory!"
