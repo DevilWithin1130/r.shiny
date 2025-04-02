@@ -1,4 +1,4 @@
-name: RenoPilot CI/CD
+name: RenoPilot Container Instance CI/CD
 
 on: 
   push:
