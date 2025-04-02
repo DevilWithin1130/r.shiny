@@ -199,15 +199,14 @@ jobs:
       with:
         inlineScript: |
           ACR_NAME="renopilotcontreg"
-          # Premium SKU required for advanced features:
-          # - Virtual Network support
-          # - Enhanced throughput
-          # - Geo-replication capability
-          # - Content trust for image tag signing
+          # Using Standard SKU instead of Premium to avoid quota issues:
+          # - Still provides good performance
+          # - Sufficient for development and testing
+          # - More widely available in regions
           az acr create \
             --resource-group RenoPilotContainerRG \
             --name $ACR_NAME \
-            --sku Premium \
+            --sku Standard \
             --location australiaeast \
             --admin-enabled true  # Enables admin authentication for testing, consider disabling in production
           
@@ -216,11 +215,12 @@ jobs:
           ACR_USERNAME=$(az acr credential show -n $ACR_NAME --query username -o tsv)
           ACR_PASSWORD=$(az acr credential show -n $ACR_NAME --query "passwords[0].value" -o tsv)
           
-          echo "::set-output name=login_server::$ACR_LOGIN_SERVER"
-          echo "::add-mask::$ACR_PASSWORD"
+          # Update to use newer GitHub Actions output syntax
           echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
           echo "ACR_USERNAME=$ACR_USERNAME" >> $GITHUB_ENV
           echo "ACR_PASSWORD=$ACR_PASSWORD" >> $GITHUB_ENV
+          # Add mask to hide sensitive output in logs
+          echo "::add-mask::$ACR_PASSWORD"
 
     - name: Build and push image
       uses: azure/docker-login@v1
@@ -310,15 +310,20 @@ jobs:
           echo "Configuring Azure SQL Server firewall rules..."
           SUBNET_ADDRESS_PREFIX=$(az network vnet subnet show --resource-group RenoPilotContainerRG --vnet-name renopilot-container-vpc --name ContainerPublicSubnet --query addressPrefix -o tsv)
           
-          # Only try to create the firewall rule if the subnet was found
-          if [ -n "$SUBNET_ADDRESS_PREFIX" ]; then
-            echo "Found subnet prefix: $SUBNET_ADDRESS_PREFIX"
-            az sql server firewall-rule create \
-              --resource-group RenoPilotContainerRG \
-              --server shiny \
-              --name "AllowContainerSubnet" \
-              --start-ip-address ${SUBNET_ADDRESS_PREFIX%/*} \
-              --end-ip-address 255.255.255.255 || echo "SQL server firewall rule creation failed, but continuing"
+          # Check if SQL server exists before attempting to create rules
+          if az sql server show --name shiny --resource-group RenoPilotContainerRG &>/dev/null; then
+            # Only try to create the firewall rule if the subnet was found
+            if [ -n "$SUBNET_ADDRESS_PREFIX" ]; then
+              echo "Found subnet prefix: $SUBNET_ADDRESS_PREFIX"
+              az sql server firewall-rule create \
+                --resource-group RenoPilotContainerRG \
+                --server shiny \
+                --name "AllowContainerSubnet" \
+                --start-ip-address ${SUBNET_ADDRESS_PREFIX%/*} \
+                --end-ip-address 255.255.255.255 || echo "SQL server firewall rule creation failed, but continuing"
+            else
+              echo "Warning: Could not find subnet prefix. Skipping SQL firewall rule creation."
+            fi
           else
-            echo "Warning: Could not find subnet prefix. Skipping SQL firewall rule creation."
+            echo "SQL server 'shiny' not found. Firewall rule creation skipped."
           fi

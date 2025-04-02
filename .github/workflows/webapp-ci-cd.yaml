@@ -203,15 +203,14 @@ jobs:
       with:
         inlineScript: |
           ACR_NAME="renopilotwebappreg"
-          # Premium SKU required for advanced features:
-          # - Virtual Network support
-          # - Enhanced throughput
-          # - Geo-replication capability
-          # - Content trust for image tag signing
+          # Using Standard SKU instead of Premium to avoid quota issues:
+          # - Still provides good performance
+          # - Sufficient for development and testing
+          # - More widely available in regions
           az acr create \
             --resource-group RenoPilotWebAppRG \
             --name $ACR_NAME \
-            --sku Premium \
+            --sku Standard \
             --location australiaeast \
             --admin-enabled true  # Enables admin authentication for testing, consider disabling in production
           
@@ -220,11 +219,11 @@ jobs:
           ACR_USERNAME=$(az acr credential show -n $ACR_NAME --query username -o tsv)
           ACR_PASSWORD=$(az acr credential show -n $ACR_NAME --query "passwords[0].value" -o tsv)
           
-          echo "::set-output name=login_server::$ACR_LOGIN_SERVER"
-          echo "::add-mask::$ACR_PASSWORD"
           echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
           echo "ACR_USERNAME=$ACR_USERNAME" >> $GITHUB_ENV
           echo "ACR_PASSWORD=$ACR_PASSWORD" >> $GITHUB_ENV
+          # Add mask to hide sensitive output in logs
+          echo "::add-mask::$ACR_PASSWORD"
 
     - name: Build and push image
       uses: azure/docker-login@v1
@@ -240,20 +239,13 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Create a premium App Service plan for production workloads
+          # Create a Basic tier App Service plan instead of Premium to avoid quota issues
           az appservice plan create \
             --name renopilot-plan \
             --resource-group RenoPilotWebAppRG \
             --is-linux \
-            --sku P1V2 \
+            --sku B1 \
             --location australiaeast
-
-    - name: Deploy to Azure Web App
-      uses: azure/webapps-deploy@v2
-      with:
-        app-name: renopilot-webapp
-        resource-group-name: RenoPilotWebAppRG
-        images: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
 
     - name: Create Web App
       uses: azure/cli@v1
