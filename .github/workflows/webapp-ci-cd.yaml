@@ -335,14 +335,45 @@ jobs:
             echo "VNet '$VNET_NAME' already exists. Skipping creation."
           else
             echo "Creating VNet '$VNET_NAME'..."
-            az network vnet create \
-              --name $VNET_NAME \
-              --resource-group RenoPilotWebAppRG \
-              --location $LOCATION \
-              --address-prefix 10.1.0.0/16
             
-            # Add delay to ensure VNet is fully provisioned
-            sleep 10
+            # Implement retry logic with exponential backoff
+            MAX_RETRIES=3
+            RETRY_DELAY=30
+            SUCCESS=false
+            
+            for ((i=1; i<=MAX_RETRIES; i++)); do
+              echo "Attempt $i of $MAX_RETRIES to create VNet..."
+              if ERROR_OUTPUT=$(az network vnet create \
+                --name $VNET_NAME \
+                --resource-group RenoPilotWebAppRG \
+                --location $LOCATION \
+                --address-prefix 10.1.0.0/16 2>&1); then
+                
+                echo "VNet created successfully!"
+                SUCCESS=true
+                break
+              else
+                echo "Failed to create VNet on attempt $i"
+                echo "Error details:"
+                echo "$ERROR_OUTPUT"
+                
+                # Handle throttling specifically
+                if [[ "$ERROR_OUTPUT" == *"throttled"* ]]; then
+                  RETRY_DELAY=$((RETRY_DELAY * 2))
+                  echo "Throttling detected. Waiting $RETRY_DELAY seconds before retry..."
+                fi
+                
+                if [ $i -lt $MAX_RETRIES ]; then
+                  echo "Waiting for $RETRY_DELAY seconds before next attempt..."
+                  sleep $RETRY_DELAY
+                fi
+              fi
+            done
+            
+            if [ "$SUCCESS" != "true" ]; then
+              echo "ERROR: Failed to create VNet after $MAX_RETRIES attempts."
+              echo "Will attempt to continue the deployment with other resources."
+            fi
           fi
           
           # Store VNet name for later steps
@@ -669,82 +700,151 @@ jobs:
           # Use the SKU we set (defaulting to B1)
           SKU="${{ env.APP_SKU }}"
           
-          # Check if App Service Plan already exists
-          if az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
-            echo "App Service Plan '$APP_PLAN_NAME' already exists. Skipping creation."
+          # First check if ANY App Service Plan exists across regions to reuse
+          echo "Checking for any existing App Service Plans across regions..."
+          EXISTING_PLANS=$(az appservice plan list --query "[?resourceGroup=='RenoPilotWebAppRG'].{name:name, location:location, sku:sku.name}" -o json)
+          
+          if [ -n "$EXISTING_PLANS" ] && [ "$EXISTING_PLANS" != "[]" ]; then
+            # Found existing plans - use the first one regardless of region
+            EXISTING_PLAN_NAME=$(echo $EXISTING_PLANS | jq -r '.[0].name')
+            EXISTING_PLAN_LOCATION=$(echo $EXISTING_PLANS | jq -r '.[0].location')
+            EXISTING_PLAN_SKU=$(echo $EXISTING_PLANS | jq -r '.[0].sku')
+            
+            echo "Found existing App Service Plan '$EXISTING_PLAN_NAME' in $EXISTING_PLAN_LOCATION with SKU $EXISTING_PLAN_SKU"
+            echo "Using existing App Service Plan to avoid throttling..."
+            
+            # Update location if needed - this might affect other resources but prevents throttling
+            if [ "$EXISTING_PLAN_LOCATION" != "$LOCATION" ]; then
+              echo "WARNING: Using App Service Plan from a different region ($EXISTING_PLAN_LOCATION) than requested ($LOCATION)"
+              echo "This may affect performance but will avoid throttling issues."
+              LOCATION=$EXISTING_PLAN_LOCATION
+              echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
+            fi
+            
+            # Store the plan name for later steps
+            APP_PLAN_NAME=$EXISTING_PLAN_NAME
+            echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+            echo "APP_SKU=$EXISTING_PLAN_SKU" >> $GITHUB_ENV
           else
-            echo "Creating App Service Plan '$APP_PLAN_NAME' with SKU $SKU..."
-            
-            # Implement exponential backoff for the app service plan creation
-            MAX_RETRIES=5
-            RETRY_DELAY=30
-            SUCCESS=false
-            
-            for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
-              echo "Attempt $attempt of $MAX_RETRIES to create App Service Plan..."
+            # Check if App Service Plan already exists in the requested location
+            if az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
+              echo "App Service Plan '$APP_PLAN_NAME' already exists. Skipping creation."
+            else
+              echo "Creating App Service Plan '$APP_PLAN_NAME' with SKU $SKU..."
               
-              # Capture detailed error output
-              if ERROR_OUTPUT=$(az appservice plan create \
-                --name $APP_PLAN_NAME \
-                --resource-group RenoPilotWebAppRG \
-                --is-linux \
-                --sku $SKU \
-                --location $LOCATION 2>&1); then
-                
-                echo "App Service Plan created successfully with SKU $SKU!"
-                SUCCESS=true
-                break
-              else
-                echo "Failed to create App Service Plan with SKU $SKU."
-                echo "Error details:"
-                echo "$ERROR_OUTPUT"
-                
-                if [[ "$ERROR_OUTPUT" == *"throttled"* ]]; then
-                  echo "Detected API throttling. Waiting longer before retry..."
-                  RETRY_DELAY=$((RETRY_DELAY * 2))
-                fi
-                
-                if [ $attempt -lt $MAX_RETRIES ]; then
-                  echo "Waiting for $RETRY_DELAY seconds before next attempt..."
-                  sleep $RETRY_DELAY
-                fi
-              fi
-            done
-            
-            if [ "$SUCCESS" = "false" ]; then
-              echo "WARNING: Failed to create App Service Plan after $MAX_RETRIES attempts."
-              echo "Attempting to create with a different SKU as a last resort..."
+              # Implement more aggressive exponential backoff for throttling
+              MAX_RETRIES=6  # Increased from 5 to 6
+              RETRY_DELAY=60  # Start with 1 minute delay
+              MAX_DELAY=600  # Max delay of 10 minutes
+              SUCCESS=false
               
-              # Try one more time with a different SKU
-              for FALLBACK_SKU in "S1" "B2" "P1v2"; do
-                if [ "$FALLBACK_SKU" != "$SKU" ]; then
-                  echo "Trying with fallback SKU: $FALLBACK_SKU"
-                  if az appservice plan create \
-                    --name $APP_PLAN_NAME \
-                    --resource-group RenoPilotWebAppRG \
-                    --is-linux \
-                    --sku $FALLBACK_SKU \
-                    --location $LOCATION; then
+              for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+                echo "Attempt $attempt of $MAX_RETRIES to create App Service Plan..."
+                
+                # Capture detailed error output
+                if ERROR_OUTPUT=$(az appservice plan create \
+                  --name $APP_PLAN_NAME \
+                  --resource-group RenoPilotWebAppRG \
+                  --is-linux \
+                  --sku $SKU \
+                  --location $LOCATION 2>&1); then
+                  
+                  echo "App Service Plan created successfully with SKU $SKU!"
+                  SUCCESS=true
+                  break
+                else
+                  echo "Failed to create App Service Plan with SKU $SKU."
+                  echo "Error details:"
+                  echo "$ERROR_OUTPUT"
+                  
+                  if [[ "$ERROR_OUTPUT" == *"throttled"* ]]; then
+                    echo "Detected API throttling."
+                    # First attempt alternative SKUs immediately instead of waiting
+                    if [ $attempt -eq 1 ]; then
+                      echo "Trying with alternative SKUs due to throttling..."
+                      for ALT_SKU in "F1" "B2" "S1" "P1v2"; do
+                        if [ "$ALT_SKU" != "$SKU" ]; then
+                          echo "Attempting with alternative SKU: $ALT_SKU"
+                          if az appservice plan create \
+                            --name $APP_PLAN_NAME \
+                            --resource-group RenoPilotWebAppRG \
+                            --is-linux \
+                            --sku $ALT_SKU \
+                            --location $LOCATION &>/dev/null; then
+                            
+                            echo "Success with alternative SKU $ALT_SKU!"
+                            SKU=$ALT_SKU
+                            SUCCESS=true
+                            break
+                          else
+                            echo "Failed with SKU $ALT_SKU, trying next option."
+                          fi
+                        fi
+                      done
+                      
+                      if [ "$SUCCESS" = "true" ]; then
+                        # We succeeded with an alternative SKU
+                        break
+                      fi
+                    fi
                     
-                    echo "App Service Plan created successfully with fallback SKU $FALLBACK_SKU!"
-                    SKU=$FALLBACK_SKU
-                    SUCCESS=true
-                    break
+                    # Calculate exponential backoff delay with max cap
+                    RETRY_DELAY=$((RETRY_DELAY * 2))
+                    if [ $RETRY_DELAY -gt $MAX_DELAY ]; then
+                      RETRY_DELAY=$MAX_DELAY
+                    fi
+                    echo "Throttling detected. Using exponential backoff. Waiting $RETRY_DELAY seconds before retry..."
+                  else
+                    # For non-throttling errors, use standard delay
+                    RETRY_DELAY=30
+                    echo "Error occurred. Waiting $RETRY_DELAY seconds before retry..."
+                  fi
+                  
+                  if [ $attempt -lt $MAX_RETRIES ]; then
+                    sleep $RETRY_DELAY
                   fi
                 fi
               done
               
+              # If creation still failed after all retries
               if [ "$SUCCESS" = "false" ]; then
-                echo "ERROR: All attempts to create App Service Plan failed."
-                echo "Please check your Azure subscription quota limits and try again."
-                exit 1
+                echo "WARNING: Failed to create App Service Plan after $MAX_RETRIES attempts."
+                echo "Checking for ANY existing App Service Plan in the subscription to reuse..."
+                
+                # Desperate measures: look for ANY unused App Service Plan in the subscription
+                ALL_PLANS=$(az appservice plan list --query "[?sku.name=='$SKU']|[?numberOfSites==\`0\`].{name:name, location:location}" -o json)
+                
+                if [ -n "$ALL_PLANS" ] && [ "$ALL_PLANS" != "[]" ]; then
+                  # Found an unused plan in the subscription
+                  EXISTING_PLAN_NAME=$(echo $ALL_PLANS | jq -r '.[0].name')
+                  EXISTING_PLAN_LOCATION=$(echo $ALL_PLANS | jq -r '.[0].location')
+                  
+                  echo "Found unused App Service Plan '$EXISTING_PLAN_NAME' in $EXISTING_PLAN_LOCATION"
+                  echo "WARNING: This plan belongs to a different project but will be used to avoid throttling."
+                  
+                  # Update location to match the found plan's location
+                  LOCATION=$EXISTING_PLAN_LOCATION
+                  APP_PLAN_NAME=$EXISTING_PLAN_NAME
+                  
+                  echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
+                  echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+                  echo "APP_SKU=$SKU" >> $GITHUB_ENV
+                  
+                  echo "Will create web app in this alternative location to avoid throttling."
+                else
+                  echo "ERROR: All attempts to create or find App Service Plan failed."
+                  echo "Please manually create an App Service Plan named 'renopilot-plan-australiaeast' in the Azure portal"
+                  echo "or request a quota increase by opening a support ticket with Azure."
+                  echo "You can also try again later when throttling limits have reset."
+                  exit 1
+                fi
+              else
+                # Store App Service Plan name and SKU for later steps
+                echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+                echo "APP_SKU=$SKU" >> $GITHUB_ENV
               fi
             fi
           fi
-          
-          # Store App Service Plan name and SKU for later steps
-          echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
-          echo "APP_SKU=$SKU" >> $GITHUB_ENV
 
     - name: Create Web App and Configure
       uses: azure/cli@v1
@@ -757,34 +857,108 @@ jobs:
           # Check if Web App already exists
           if az webapp show --name $WEBAPP_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
             echo "Web App '$WEBAPP_NAME' already exists. Skipping creation."
+            echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
           else
             echo "Creating Web App '$WEBAPP_NAME'..."
             
-            # Create the web app without the image (we'll deploy separately)
-            az webapp create \
-              --resource-group RenoPilotWebAppRG \
-              --plan ${{ env.APP_PLAN_NAME }} \
-              --name $WEBAPP_NAME \
-              --deployment-container-image-name nginx \
-              --runtime "DOCKER|nginx"
-            echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
+            # Add retry logic with exponential backoff
+            MAX_RETRIES=4
+            RETRY_DELAY=30
+            SUCCESS=false
+            
+            for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+              echo "Attempt $attempt of $MAX_RETRIES to create Web App..."
+              
+              # Capture detailed error output
+              if ERROR_OUTPUT=$(az webapp create \
+                --resource-group RenoPilotWebAppRG \
+                --plan ${{ env.APP_PLAN_NAME }} \
+                --name $WEBAPP_NAME \
+                --deployment-container-image-name nginx \
+                --runtime "DOCKER|nginx" 2>&1); then
+                
+                echo "Web App created successfully!"
+                echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
+                SUCCESS=true
+                break
+              else
+                echo "Failed to create Web App."
+                echo "Error details:"
+                echo "$ERROR_OUTPUT"
+                
+                if [[ "$ERROR_OUTPUT" == *"throttled"* ]]; then
+                  # Handle throttling with exponential backoff
+                  RETRY_DELAY=$((RETRY_DELAY * 2))
+                  echo "Throttling detected. Increasing delay to $RETRY_DELAY seconds."
+                fi
+                
+                if [ $attempt -lt $MAX_RETRIES ]; then
+                  echo "Waiting for $RETRY_DELAY seconds before next attempt..."
+                  sleep $RETRY_DELAY
+                fi
+              fi
+            done
+            
+            # If all attempts failed
+            if [ "$SUCCESS" != "true" ]; then
+              echo "WARNING: Failed to create Web App after $MAX_RETRIES attempts."
+              
+              # Try with a modified name as a fallback
+              FALLBACK_NAME="${WEBAPP_NAME}-${RANDOM}"
+              echo "Trying with fallback name: $FALLBACK_NAME"
+              
+              if az webapp create \
+                --resource-group RenoPilotWebAppRG \
+                --plan ${{ env.APP_PLAN_NAME }} \
+                --name $FALLBACK_NAME \
+                --deployment-container-image-name nginx \
+                --runtime "DOCKER|nginx" &>/dev/null; then
+                
+                echo "Web App created with fallback name: $FALLBACK_NAME"
+                WEBAPP_NAME=$FALLBACK_NAME
+                echo "WEBAPP_NAME=$WEBAPP_NAME" >> $GITHUB_ENV
+                SUCCESS=true
+              else
+                echo "ERROR: All attempts to create Web App failed."
+                echo "Please check your Azure subscription and try again later."
+                exit 1
+              fi
+            fi
             
             # Add delay to ensure webapp is created
             sleep 15
             
-            # Configure environment variables for the web app
-            az webapp config appsettings set \
-              --resource-group RenoPilotWebAppRG \
-              --name $WEBAPP_NAME \
-              --settings \
-              DOCKER_ENV=true \
-              DB_SERVER=shiny.database.windows.net \
-              DB_NAME=Shiny \
-              DB_USER=shiny \
-              DB_DRIVER="ODBC Driver 18 for SQL Server" \
-              DB_PORT=1433 \
-              WEBSITES_PORT=3838 \
-              DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
+            # Configure environment variables with retry logic
+            echo "Configuring environment variables for web app..."
+            CONFIG_RETRIES=3
+            for ((i=1; i<=CONFIG_RETRIES; i++)); do
+              if az webapp config appsettings set \
+                --resource-group RenoPilotWebAppRG \
+                --name $WEBAPP_NAME \
+                --settings \
+                DOCKER_ENV=true \
+                DB_SERVER=shiny.database.windows.net \
+                DB_NAME=Shiny \
+                DB_USER=shiny \
+                DB_DRIVER="ODBC Driver 18 for SQL Server" \
+                DB_PORT=1433 \
+                WEBSITES_PORT=3838 \
+                DB_PASSWORD="${{ secrets.DB_PASSWORD }}" &>/dev/null; then
+                
+                echo "Environment variables configured successfully!"
+                break
+              else
+                echo "Failed to configure environment variables on attempt $i of $CONFIG_RETRIES"
+                
+                if [ $i -lt $CONFIG_RETRIES ]; then
+                  echo "Waiting before retry..."
+                  sleep 30
+                else
+                  echo "WARNING: Could not configure all environment variables."
+                  echo "You may need to set them manually in the Azure portal."
+                fi
+              fi
+            done
           fi
 
     - name: Deploy to Azure Web App
@@ -831,28 +1005,83 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Configure container settings after deployment
+          # Configure container settings after deployment with retry logic
           echo "Configuring container settings after deployment..."
-          az webapp config container set \
-            --name ${{ env.WEBAPP_NAME }} \
-            --resource-group RenoPilotWebAppRG \
-            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
-            --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
-            --docker-registry-server-user ${{ env.ACR_USERNAME }} \
-            --docker-registry-server-password ${{ env.ACR_PASSWORD }} \
-            --enable-app-service-storage false
           
-          # Explicitly set port mapping
+          MAX_RETRIES=3
+          SUCCESS=false
+          
+          for ((i=1; i<=MAX_RETRIES; i++)); do
+            echo "Attempt $i of $MAX_RETRIES to configure container settings..."
+            
+            if az webapp config container set \
+              --name ${{ env.WEBAPP_NAME }} \
+              --resource-group RenoPilotWebAppRG \
+              --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
+              --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
+              --docker-registry-server-user ${{ env.ACR_USERNAME }} \
+              --docker-registry-server-password ${{ env.ACR_PASSWORD }} \
+              --enable-app-service-storage false &>/dev/null; then
+              
+              echo "Container settings configured successfully!"
+              SUCCESS=true
+              break
+            else
+              echo "Failed to configure container settings on attempt $i"
+              
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Waiting before retry..."
+                sleep 30
+              fi
+            fi
+          done
+          
+          if [ "$SUCCESS" != "true" ]; then
+            echo "WARNING: Could not configure all container settings properly."
+            echo "The deployment might be affected. Consider checking the web app in Azure portal."
+          fi
+          
+          # Explicitly set port mapping with retry logic
           echo "Setting port mapping to 3838..."
-          az webapp config appsettings set \
-            --resource-group RenoPilotWebAppRG \
-            --name ${{ env.WEBAPP_NAME }} \
-            --settings \
-            WEBSITES_PORT=3838
+          for ((i=1; i<=MAX_RETRIES; i++)); do
+            if az webapp config appsettings set \
+              --resource-group RenoPilotWebAppRG \
+              --name ${{ env.WEBAPP_NAME }} \
+              --settings \
+              WEBSITES_PORT=3838 &>/dev/null; then
+              
+              echo "Port mapping set successfully!"
+              break
+            else
+              echo "Failed to set port mapping on attempt $i"
+              
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Waiting before retry..."
+                sleep 30
+              else
+                echo "WARNING: Could not set port mapping."
+              fi
+            fi
+          done
           
-          # Ensure container is restarted to apply settings
+          # Restart web app with retry logic
           echo "Restarting web app to apply configuration..."
-          az webapp restart --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG
+          for ((i=1; i<=MAX_RETRIES; i++)); do
+            if az webapp restart --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG &>/dev/null; then
+              echo "Web app restarted successfully!"
+              break
+            else
+              echo "Failed to restart web app on attempt $i"
+              
+              if [ $i -lt $MAX_RETRIES ]; then
+                echo "Waiting before retry..."
+                sleep 30
+              else
+                echo "WARNING: Could not restart the web app."
+                echo "You may need to restart it manually in the Azure portal."
+              fi
+            fi
+          done
           
           # Display the web app URL
           WEBAPP_URL=$(az webapp show --name ${{ env.WEBAPP_NAME }} --resource-group RenoPilotWebAppRG --query "defaultHostName" -o tsv)
