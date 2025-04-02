@@ -95,7 +95,7 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Try a list of regions in order of preference - only Australian regions
+          # Only check Australian regions in order of preference
           REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
           LOCATION=""
           
@@ -106,84 +106,66 @@ jobs:
             echo "Resource Group already exists."
             
             # If resource group exists, check if we already have resources deployed
-            # Try to find an existing Container Instance in the resource group
             EXISTING_CONTAINERS=$(az container list --resource-group RenoPilotContainerRG --query "[].{name:name, location:location}" -o json)
             
-            # If we have existing containers, use their location
+            # If we have existing containers, use their location (only if it's one of our Australian regions)
             if [ -n "$EXISTING_CONTAINERS" ] && [ "$EXISTING_CONTAINERS" != "[]" ]; then
-              # Use the location of the first container found
-              LOCATION=$(echo $EXISTING_CONTAINERS | jq -r '.[0].location')
-              echo "Using existing resources in location: $LOCATION"
-            else
-              echo "Resource Group exists but no Container Instances found. Searching for available region..."
-              # Try to find a region with available quota
+              EXISTING_LOCATION=$(echo $EXISTING_CONTAINERS | jq -r '.[0].location')
+              # Verify the existing location is in our allowed regions
               for region in "${REGIONS[@]}"; do
-                echo "Checking quota for region: $region"
-                # Try to create a small test container to check quota
-                if az container create \
-                  --name "temp-quota-check" \
-                  --image mcr.microsoft.com/azuredocs/aci-helloworld \
-                  --resource-group RenoPilotContainerRG \
-                  --location $region \
-                  --os-type Linux \
-                  --cpu 1 \
-                  --memory 1 \
-                  --no-wait \
-                  --restart-policy Never \
-                  &>/dev/null; then
-                  
-                  echo "Found region with quota: $region"
+                if [ "$region" = "$EXISTING_LOCATION" ]; then
+                  LOCATION=$EXISTING_LOCATION
+                  echo "Using existing resources in Australian region: $LOCATION"
+                  break
+                fi
+              done
+              
+              # If existing location wasn't in our list, we'll find a new one
+              if [ -z "$LOCATION" ]; then
+                echo "Existing location is not in our approved Australian regions. Finding new region..."
+              fi
+            fi
+            
+            # If no valid location found yet, check Australian regions
+            if [ -z "$LOCATION" ]; then
+              echo "Searching for available Australian region..."
+              for region in "${REGIONS[@]}"; do
+                echo "Checking Australian region availability: $region"
+                if az container list-skus --location $region --output none 2>/dev/null; then
+                  echo "Found available Australian region: $region"
                   LOCATION=$region
-                  
-                  # Clean up the temporary container
-                  az container delete --name "temp-quota-check" --resource-group RenoPilotContainerRG --yes
                   break
                 else
-                  echo "Region $region has insufficient quota or other issues."
+                  echo "Australian region $region not available for Container Instances."
                 fi
               done
             fi
           else
-            echo "Resource Group does not exist. Will create in an available region."
-            # Continue with region search as no resource group exists
+            echo "Resource Group does not exist. Creating in an available Australian region."
+            # Check approved Australian regions
             for region in "${REGIONS[@]}"; do
-              echo "Checking quota for region: $region"
-              
-              # Create resource group temporarily for testing
-              az group create --name RenoPilotContainerRG --location $region
-              
-              if az container create \
-                --name "temp-quota-check" \
-                --image mcr.microsoft.com/azuredocs/aci-helloworld \
-                --resource-group RenoPilotContainerRG \
-                --location $region \
-                --os-type Linux \
-                --cpu 1 \
-                --memory 1 \
-                --no-wait \
-                --restart-policy Never \
-                &>/dev/null; then
-                
-                echo "Found region with quota: $region"
+              echo "Checking Australian region availability: $region"
+              if az container list-skus --location $region --output none 2>/dev/null; then
+                echo "Found available Australian region: $region"
                 LOCATION=$region
                 
-                # Clean up the temporary container
-                az container delete --name "temp-quota-check" --resource-group RenoPilotContainerRG --yes
+                # Create resource group in chosen Australian region
+                az group create --name RenoPilotContainerRG --location $region
                 break
               else
-                echo "Region $region has insufficient quota or other issues."
+                echo "Australian region $region not available for Container Instances."
               fi
             done
           fi
           
-          # If no region with quota was found
+          # If no Australian region was found
           if [ -z "$LOCATION" ]; then
-            echo "ERROR: Could not find any region with available Container Instance quota."
-            echo "Please request a quota increase through the Azure portal or contact Azure support."
+            echo "ERROR: Could not find any available Australian region for Container Instances."
+            echo "Please check Azure service availability in Australia or contact Azure support."
             exit 1
           fi
           
-          echo "Using location: $LOCATION"
+          echo "Using Australian region: $LOCATION"
           
           # Store location for use in later steps
           echo "AZURE_LOCATION=$LOCATION" >> $GITHUB_ENV
@@ -192,11 +174,7 @@ jobs:
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           
-          # Check if Resource Group exists
-          if [ "$RG_EXISTS" = "false" ]; then
-            echo "Creating Resource Group in $LOCATION..."
-            az group create --name RenoPilotContainerRG --location $LOCATION
-          fi
+          # No need to check if Resource Group exists again as it's handled above
 
     - name: Deploy Container Registry
       uses: azure/cli@v1
