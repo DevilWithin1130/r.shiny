@@ -622,6 +622,24 @@ jobs:
                     SLEEP_TIME=$((20 * i))
                     echo "Waiting for $SLEEP_TIME seconds before next attempt..."
                     sleep $SLEEP_TIME
+                  fi
+                fi
+              done
+            done
+            
+            # Check if we succeeded with any SKU
+            if ! az appservice plan show --name $APP_PLAN_NAME --resource-group RenoPilotWebAppRG &>/dev/null; then
+              echo "ERROR: All attempts to create App Service Plan failed."
+              echo "Please check your Azure subscription quota limits and try again."
+              exit 1
+            fi
+          fi
+          
+          # Store App Service Plan name for later steps
+          echo "APP_PLAN_NAME=$APP_PLAN_NAME" >> $GITHUB_ENV
+
+    - name: Create Web App and Configure
+      uses: azure/cli@v1
       with:
         inlineScript: |
           LOCATION="${{ env.AZURE_LOCATION }}"
