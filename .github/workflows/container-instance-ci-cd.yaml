@@ -173,8 +173,133 @@ jobs:
           # Generate a timestamp for unique resource names
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+
+    - name: Clean Existing Infrastructure
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          LOCATION="${{ env.AZURE_LOCATION }}"
+          echo "Starting infrastructure cleanup in region: $LOCATION"
           
-          # No need to check if Resource Group exists again as it's handled above
+          # Define resource naming patterns
+          CONTAINER_NAME="renopilot-container-$LOCATION"
+          VNET_NAME="renopilot-container-vpc-$LOCATION"
+          SUBNET_NAME="ContainerSubnet-$LOCATION"
+          PUBLIC_FW_NAME="container-publicfw-$LOCATION"
+          PRIVATE_FW_NAME="container-privatefw-$LOCATION"
+          NSG_NAME="container-nsg-$LOCATION"
+          ACR_NAME="renopilot${LOCATION}reg"
+          
+          # Store names for later steps
+          echo "VNET_NAME=$VNET_NAME" >> $GITHUB_ENV
+          echo "SUBNET_NAME=$SUBNET_NAME" >> $GITHUB_ENV
+          echo "PUBLIC_FW_NAME=$PUBLIC_FW_NAME" >> $GITHUB_ENV
+          echo "PRIVATE_FW_NAME=$PRIVATE_FW_NAME" >> $GITHUB_ENV
+          echo "ACR_NAME=$ACR_NAME" >> $GITHUB_ENV
+          
+          # 1. Delete Container Instances
+          echo "Checking for existing container instances..."
+          if az container show --name $CONTAINER_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Deleting container instance: $CONTAINER_NAME"
+            az container delete --name $CONTAINER_NAME --resource-group RenoPilotContainerRG --yes
+            echo "Waiting for container deletion to complete..."
+            sleep 30
+          else
+            echo "No existing container instance found."
+          fi
+          
+          # 2. Delete Network Security Group Rules first
+          echo "Checking for existing NSG rules..."
+          if az network nsg show --name $NSG_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            if az network nsg rule show --name AllowShinyInbound --nsg-name $NSG_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+              echo "Deleting NSG rule: AllowShinyInbound"
+              az network nsg rule delete --name AllowShinyInbound --nsg-name $NSG_NAME --resource-group RenoPilotContainerRG
+            fi
+          fi
+          
+          # 3. Remove NSG from subnet if exists
+          echo "Checking if subnet has NSG association..."
+          if az network vnet subnet show --name $SUBNET_NAME --vnet-name $VNET_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Removing NSG association from subnet..."
+            az network vnet subnet update --name $SUBNET_NAME --vnet-name $VNET_NAME --resource-group RenoPilotContainerRG --network-security-group "" || echo "No NSG to remove or error removing NSG from subnet."
+          fi
+          
+          # 4. Delete Network Security Group
+          echo "Checking for existing NSG..."
+          if az network nsg show --name $NSG_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Deleting NSG: $NSG_NAME"
+            az network nsg delete --name $NSG_NAME --resource-group RenoPilotContainerRG
+          else
+            echo "No existing NSG found."
+          fi
+          
+          # 5. Delete Firewall Rule Collections
+          echo "Checking for existing firewall rule collections..."
+          if az network firewall show --name $PRIVATE_FW_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            for collection in sqltraffic dockertraffic; do
+              if az network firewall network-rule collection show --name $collection --firewall-name $PRIVATE_FW_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+                echo "Deleting rule collection: $collection"
+                az network firewall network-rule collection delete --name $collection --firewall-name $PRIVATE_FW_NAME --resource-group RenoPilotContainerRG
+              fi
+            done
+          fi
+          
+          if az network firewall show --name $PUBLIC_FW_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            for collection in webtraffic shinytraffic; do
+              if az network firewall network-rule collection show --name $collection --firewall-name $PUBLIC_FW_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+                echo "Deleting rule collection: $collection"
+                az network firewall network-rule collection delete --name $collection --firewall-name $PUBLIC_FW_NAME --resource-group RenoPilotContainerRG
+              fi
+            done
+          fi
+          
+          # 6. Delete Firewalls
+          echo "Checking for existing firewalls..."
+          if az network firewall show --name $PRIVATE_FW_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Deleting private firewall: $PRIVATE_FW_NAME"
+            az network firewall delete --name $PRIVATE_FW_NAME --resource-group RenoPilotContainerRG
+          else
+            echo "No existing private firewall found."
+          fi
+          
+          if az network firewall show --name $PUBLIC_FW_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Deleting public firewall: $PUBLIC_FW_NAME"
+            az network firewall delete --name $PUBLIC_FW_NAME --resource-group RenoPilotContainerRG
+          else
+            echo "No existing public firewall found."
+          fi
+          
+          # 7. Delete Subnet
+          echo "Checking for existing subnet..."
+          if az network vnet subnet show --name $SUBNET_NAME --vnet-name $VNET_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Deleting subnet: $SUBNET_NAME"
+            az network vnet subnet delete --name $SUBNET_NAME --vnet-name $VNET_NAME --resource-group RenoPilotContainerRG
+            echo "Waiting for subnet deletion to complete..."
+            sleep 30
+          else
+            echo "No existing subnet found."
+          fi
+          
+          # 8. Delete Virtual Network
+          echo "Checking for existing VNet..."
+          if az network vnet show --name $VNET_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Deleting VNet: $VNET_NAME"
+            az network vnet delete --name $VNET_NAME --resource-group RenoPilotContainerRG
+            echo "Waiting for VNet deletion to complete..."
+            sleep 30
+          else
+            echo "No existing VNet found."
+          fi
+          
+          # 9. We'll keep ACR to maintain Docker images, just verify it exists or will be created
+          echo "Checking ACR..."
+          if az acr show --name $ACR_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Container Registry exists: $ACR_NAME - will be kept to preserve images"
+          else
+            echo "Container Registry does not exist, will be created in later steps."
+          fi
+          
+          echo "Cleanup completed. Ready for fresh infrastructure deployment."
 
     - name: Deploy Container Registry
       uses: azure/cli@v1
@@ -182,7 +307,7 @@ jobs:
         inlineScript: |
           LOCATION="${{ env.AZURE_LOCATION }}"
           # Use a unique ACR name that includes location (ACR names must be globally unique)
-          ACR_NAME="renopilot${LOCATION}reg"
+          ACR_NAME="${{ env.ACR_NAME }}"
           
           # Check if ACR already exists
           if az acr show --name $ACR_NAME --resource-group RenoPilotContainerRG &>/dev/null; then
@@ -202,7 +327,6 @@ jobs:
           ACR_USERNAME=$(az acr credential show -n $ACR_NAME --query username -o tsv)
           ACR_PASSWORD=$(az acr credential show -n $ACR_NAME --query "passwords[0].value" -o tsv)
           
-          echo "ACR_NAME=$ACR_NAME" >> $GITHUB_ENV
           echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
           echo "ACR_USERNAME=$ACR_USERNAME" >> $GITHUB_ENV
           echo "ACR_PASSWORD=$ACR_PASSWORD" >> $GITHUB_ENV
@@ -216,19 +340,34 @@ jobs:
         inlineScript: |
           LOCATION="${{ env.AZURE_LOCATION }}"
           ACR_NAME="renopilot${LOCATION}reg"
-          IMAGE_TAG="${{ github.sha }}"
+          
+          # Get the latest commit SHA from the RenoPilot.Container.2025 repository
+          echo "Fetching latest commit SHA from RenoPilot/RenoPilot.Container.2025.git..."
+          CONTAINER_REPO_SHA=$(curl -s https://api.github.com/repos/RenoPilot/RenoPilot.Container.2025/commits/main | jq -r .sha)
+          
+          # In case of API rate limiting or other errors, provide a fallback
+          if [ -z "$CONTAINER_REPO_SHA" ] || [ "$CONTAINER_REPO_SHA" == "null" ]; then
+            echo "Failed to fetch SHA from remote repository. Using current commit SHA as fallback."
+            CONTAINER_REPO_SHA="${{ github.sha }}"
+          else
+            echo "Using RenoPilot.Container.2025 repository SHA: $CONTAINER_REPO_SHA"
+          fi
+          
+          # Store the SHA for later use
+          echo "CONTAINER_REPO_SHA=$CONTAINER_REPO_SHA" >> $GITHUB_ENV
+          
           IMAGE_NAME="renopilot-container"
           
           # Check if the image with the specific tag already exists in ACR
-          echo "Checking if image $IMAGE_NAME:$IMAGE_TAG already exists in ACR..."
+          echo "Checking if image $IMAGE_NAME:$CONTAINER_REPO_SHA already exists in ACR..."
           
           # Using az acr repository show to check if image exists
-          if az acr repository show --name $ACR_NAME --image "$IMAGE_NAME:$IMAGE_TAG" &>/dev/null; then
-            echo "Image $IMAGE_NAME:$IMAGE_TAG already exists in ACR. Skipping build and push."
+          if az acr repository show --name $ACR_NAME --image "$IMAGE_NAME:$CONTAINER_REPO_SHA" &>/dev/null; then
+            echo "Image $IMAGE_NAME:$CONTAINER_REPO_SHA already exists in ACR. Skipping build and push."
             echo "IMAGE_EXISTS=true" >> $GITHUB_ENV
             echo "exists=true" >> $GITHUB_OUTPUT  # Updated to current GitHub Actions syntax
           else
-            echo "Image $IMAGE_NAME:$IMAGE_TAG does not exist in ACR. Will build and push."
+            echo "Image $IMAGE_NAME:$CONTAINER_REPO_SHA does not exist in ACR. Will build and push."
             echo "IMAGE_EXISTS=false" >> $GITHUB_ENV
             echo "exists=false" >> $GITHUB_OUTPUT  # Updated to current GitHub Actions syntax
           fi
@@ -242,9 +381,21 @@ jobs:
         password: ${{ env.ACR_PASSWORD }}
     - run: |
         if [ "${{ env.IMAGE_EXISTS }}" != "true" ]; then
-          echo "Building and pushing new Docker image..."
-          docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }}          
-          docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }}
+          echo "Building and pushing new Docker image from RenoPilot.Container.2025 repository..."
+          
+          # Clone the repository
+          git clone https://github.com/RenoPilot/RenoPilot.Container.2025.git temp-container-repo
+          cd temp-container-repo
+          
+          # Build the Docker image
+          docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA }}
+          
+          # Push the image to ACR
+          docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA }}
+          
+          # Clean up
+          cd ..
+          rm -rf temp-container-repo
         else
           echo "Skipping Docker build and push as image already exists."
         fi
@@ -351,7 +502,7 @@ jobs:
             az container create \
               --name $CONTAINER_NAME \
               --resource-group RenoPilotContainerRG \
-              --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ github.sha }} \
+              --image ${{ env.ACR_LOGIN_SERVER }}/renopilot-container:${{ env.CONTAINER_REPO_SHA || github.sha }} \
               --registry-login-server ${{ env.ACR_LOGIN_SERVER }} \
               --registry-username ${{ env.ACR_USERNAME }} \
               --registry-password ${{ env.ACR_PASSWORD }} \
@@ -435,7 +586,6 @@ jobs:
             echo "Shiny app should be accessible at: http://$CONTAINER_IP:3838"
           else
             echo "Container IP address not available yet. It may take a few minutes to initialize."
-          fi
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
