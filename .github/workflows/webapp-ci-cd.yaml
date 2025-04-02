@@ -256,7 +256,7 @@ jobs:
             --resource-group RenoPilotWebAppRG \
             --plan renopilot-plan \
             --name renopilot-webapp \
-            --deployment-container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
           
           # Configure environment variables for the web app
           az webapp config appsettings set \
@@ -271,14 +271,14 @@ jobs:
             DB_PORT=1433 \
             DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
           
-          # Configure the container settings
+          # Configure the container settings using newer parameter names
           az webapp config container set \
             --name renopilot-webapp \
             --resource-group RenoPilotWebAppRG \
-            --docker-custom-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
-            --docker-registry-server-url https://${{ env.ACR_LOGIN_SERVER }} \
-            --docker-registry-server-user ${{ env.ACR_USERNAME }} \
-            --docker-registry-server-password ${{ env.ACR_PASSWORD }}
+            --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }} \
+            --container-registry-url https://${{ env.ACR_LOGIN_SERVER }} \
+            --container-registry-user ${{ env.ACR_USERNAME }} \
+            --container-registry-password ${{ env.ACR_PASSWORD }}
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
