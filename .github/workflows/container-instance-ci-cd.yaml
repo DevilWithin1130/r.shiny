@@ -95,8 +95,8 @@ jobs:
       uses: azure/cli@v1
       with:
         inlineScript: |
-          # Try a list of regions in order of preference until we find one with available quota
-          REGIONS=("australiaeast" "eastus" "westus2" "westeurope" "southeastasia" "centralus")
+          # Try a list of regions in order of preference - only Australian regions
+          REGIONS=("australiaeast" "australiasoutheast" "australiacentral" "australiacentral2")
           LOCATION=""
           
           # Check if Resource Group exists
