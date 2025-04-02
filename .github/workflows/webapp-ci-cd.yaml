@@ -171,7 +171,9 @@ jobs:
             --name WebAppPublicSubnet \
             --vnet-name renopilot-webapp-vpc \
             --resource-group RenoPilotWebAppRG \
-            --address-prefix 10.1.1.0/24
+            --address-prefix 10.1.1.0/24 \
+            --delegations Microsoft.Web/serverFarms \
+            --service-endpoints Microsoft.Web
           
           # Private subnet for sensitive resources with /24 CIDR block
           echo "Creating Private Subnet..."
@@ -180,6 +182,23 @@ jobs:
             --vnet-name renopilot-webapp-vpc \
             --resource-group RenoPilotWebAppRG \
             --address-prefix 10.1.2.0/24
+
+    - name: Deploy Network Security Groups
+      uses: azure/cli@v1
+      with:
+        inlineScript: |
+          # Create NSG for public subnet
+          az network nsg create \
+            --name webapp-public-nsg \
+            --resource-group RenoPilotWebAppRG \
+            --location australiaeast
+            
+          # Apply NSG to the subnet
+          az network vnet subnet update \
+            --name WebAppPublicSubnet \
+            --vnet-name renopilot-webapp-vpc \
+            --resource-group RenoPilotWebAppRG \
+            --network-security-group webapp-public-nsg
 
     - name: Deploy Firewalls
       uses: azure/cli@v1
@@ -191,12 +210,26 @@ jobs:
             --name webapp-publicfw \
             --resource-group RenoPilotWebAppRG \
             --location australiaeast
-
+            
           # Create Private Firewall
           az network firewall create \
             --name webapp-privatefw \
             --resource-group RenoPilotWebAppRG \
             --location australiaeast
+          
+          # Create a route table for the subnet
+          echo "Creating route table for public subnet..."
+          az network route-table create \
+            --name webapp-public-routes \
+            --resource-group RenoPilotWebAppRG \
+            --location australiaeast
+          
+          # Add the route table to the subnet
+          az network vnet subnet update \
+            --name WebAppPublicSubnet \
+            --vnet-name renopilot-webapp-vpc \
+            --resource-group RenoPilotWebAppRG \
+            --route-table webapp-public-routes
 
     - name: Deploy Container Registry
       uses: azure/cli@v1
@@ -232,7 +265,7 @@ jobs:
         username: ${{ env.ACR_USERNAME }}
         password: ${{ env.ACR_PASSWORD }}
     - run: |
-        docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
+        docker build -f containerResources/dockerfile . -t ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}          
         docker push ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
 
     - name: Create App Service Plan
@@ -257,7 +290,7 @@ jobs:
             --plan renopilot-plan \
             --name renopilot-webapp \
             --container-image-name ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
-          
+            --is-linux \
           # Configure environment variables for the web app
           az webapp config appsettings set \
             --resource-group RenoPilotWebAppRG \
@@ -269,6 +302,7 @@ jobs:
             DB_USER=shiny \
             DB_DRIVER="ODBC Driver 18 for SQL Server" \
             DB_PORT=1433 \
+            WEBSITES_PORT=3838 \
             DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
           
           # Configure the container settings using newer parameter names
@@ -279,6 +313,30 @@ jobs:
             --container-registry-url https://${{ env.ACR_LOGIN_SERVER }} \
             --container-registry-user ${{ env.ACR_USERNAME }} \
             --container-registry-password ${{ env.ACR_PASSWORD }}
+            
+          # Configure the ports for the web app
+          az webapp config appsettings set \
+            --resource-group RenoPilotWebAppRG \
+            --name renopilot-webapp \
+            --settings \
+            WEBSITES_PORT=3838
+          
+          # Integrate web app with VNet (public subnet)
+          echo "Integrating Web App with VNet..."
+          az webapp vnet-integration add \
+            --name renopilot-webapp \
+            --resource-group RenoPilotWebAppRG \
+            --vnet renopilot-webapp-vpc \
+            --subnet WebAppPublicSubnet
+
+          # Allow the web app to be accessible from anywhere
+          az webapp config access-restriction remove \
+            --name renopilot-webapp \
+            --resource-group RenoPilotWebAppRG \
+            --rule-name "Allow all" \
+            --action Allow \
+            --ip-address "Any" \
+            --priority 100
 
     - name: Configure Network Security Rules
       uses: azure/cli@v1
@@ -337,7 +395,7 @@ jobs:
             --action Allow \
             --priority 400
           
-          # Fix VNet name in subnet reference
+          # Configure Azure SQL Server firewall rules
           echo "Configuring Azure SQL Server firewall rules..."
           SUBNET_ADDRESS_PREFIX=$(az network vnet subnet show --resource-group RenoPilotWebAppRG --vnet-name renopilot-webapp-vpc --name WebAppPublicSubnet --query addressPrefix -o tsv)
           

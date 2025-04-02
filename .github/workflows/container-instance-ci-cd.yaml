@@ -176,6 +176,34 @@ jobs:
             --vnet-name renopilot-container-vpc \
             --resource-group RenoPilotContainerRG \
             --address-prefix 10.0.2.0/24
+          
+          # Add NSG for container public subnet
+          echo "Creating NSG for container public subnet..."
+          az network nsg create \
+            --name container-public-nsg \
+            --resource-group RenoPilotContainerRG \
+            --location australiaeast
+            
+          # Add rule to allow port 3838
+          az network nsg rule create \
+            --name AllowShiny \
+            --nsg-name container-public-nsg \
+            --resource-group RenoPilotContainerRG \
+            --protocol tcp \
+            --direction inbound \
+            --source-address-prefix '*' \
+            --source-port-range '*' \
+            --destination-address-prefix '*' \
+            --destination-port-range 3838 \
+            --access allow \
+            --priority 100
+            
+          # Apply NSG to the subnet
+          az network vnet subnet update \
+            --name ContainerPublicSubnet \
+            --vnet-name renopilot-container-vpc \
+            --resource-group RenoPilotContainerRG \
+            --network-security-group container-public-nsg
 
     - name: Deploy Firewalls
       uses: azure/cli@v1
