@@ -63,32 +63,31 @@ jobs:
       with:
         inlineScript: |
           # Check if resource group exists
-          RG_EXISTS=$(az group exists --name RenoPilotRG)
+          RG_EXISTS=$(az group exists --name RenoPilotContainerRG)
           
           if [ "$RG_EXISTS" = "true" ]; then
             echo "Existing infrastructure found. Cleaning up in proper order..."
             
             # 1. Delete Container Instances first (they depend on other resources)
             echo "Deleting Container Instances..."
-            az container delete --name renopilotfenceappinstance --resource-group RenoPilotRG --yes || true
+            az container delete --name renopilotfenceappinstance --resource-group RenoPilotContainerRG --yes || true
             
             # 2. Delete ACR
             echo "Deleting Azure Container Registry..."
-            az acr delete --name renopilotregistry --resource-group RenoPilotRG --yes || true
+            az acr delete --name renopilotcontreg --resource-group RenoPilotContainerRG --yes || true
             
             # 3. Delete Firewalls
             echo "Deleting Firewalls..."
-            az network firewall delete --name publicfirewall --resource-group RenoPilotRG || true
-            az network firewall delete --name privatefirewall --resource-group RenoPilotRG || true
+            az network firewall delete --name container-publicfw --resource-group RenoPilotContainerRG || true
+            az network firewall delete --name container-privatefw --resource-group RenoPilotContainerRG || true
             
             # 4. Delete VNet and subnets
             echo "Deleting VNet and subnets..."
-            az network vnet delete --name RenoPilotVPC --resource-group RenoPilotRG || true
+            az network vnet delete --name renopilot-container-vpc --resource-group RenoPilotContainerRG || true
             
             echo "Infrastructure cleanup complete."
           else
             echo "No existing infrastructure found. Proceeding with fresh deployment."
-          fi
 
     - name: Create VPC and Subnets
       uses: azure/cli@v1
@@ -96,12 +95,12 @@ jobs:
         inlineScript: |
           # Create Resource Group
           echo "Creating Resource Group..."
-          az group create --name RenoPilotRG --location australiaeast
+          az group create --name RenoPilotContainerRG --location australiaeast
           
           # Verify resource group was created
           echo "Verifying Resource Group creation..."
-          if ! az group show --name RenoPilotRG &>/dev/null; then
-            echo "Error: Resource group RenoPilotRG was not created successfully."
+          if ! az group show --name RenoPilotContainerRG &>/dev/null; then
+            echo "Error: Resource group RenoPilotContainerRG was not created successfully."
             exit 1
           fi
           
@@ -112,32 +111,32 @@ jobs:
           # VNet with /16 CIDR block allowing up to 65,536 IP addresses
           echo "Creating VNet..."
           az network vnet create \
-            --name renopilot-vpc \
-            --resource-group RenoPilotRG \
+            --name renopilot-container-vpc \
+            --resource-group RenoPilotContainerRG \
             --location australiaeast \
             --address-prefix 10.0.0.0/16
           
           # Verify VNet was created
           echo "Verifying VNet creation..."
-          if ! az network vnet show --name renopilot-vpc --resource-group RenoPilotRG &>/dev/null; then
-            echo "Error: VNet renopilot-vpc was not created successfully."
+          if ! az network vnet show --name renopilot-container-vpc --resource-group RenoPilotContainerRG &>/dev/null; then
+            echo "Error: VNet renopilot-container-vpc was not created successfully."
             exit 1
           fi
           
           # Public subnet with /24 CIDR block allowing up to 256 IP addresses
           echo "Creating Public Subnet..."
           az network vnet subnet create \
-            --name PublicSubnet \
-            --vnet-name renopilot-vpc \
-            --resource-group RenoPilotRG \
+            --name ContainerPublicSubnet \
+            --vnet-name renopilot-container-vpc \
+            --resource-group RenoPilotContainerRG \
             --address-prefix 10.0.1.0/24
           
           # Private subnet for sensitive resources with /24 CIDR block
           echo "Creating Private Subnet..."
           az network vnet subnet create \
-            --name PrivateSubnet \
-            --vnet-name renopilot-vpc \
-            --resource-group RenoPilotRG \
+            --name ContainerPrivateSubnet \
+            --vnet-name renopilot-container-vpc \
+            --resource-group RenoPilotContainerRG \
             --address-prefix 10.0.2.0/24
 
     - name: Deploy Firewalls
@@ -147,28 +146,28 @@ jobs:
           echo "Creating Firewalls..."
           # Create Public Firewall
           az network firewall create \
-            --name publicfirewall \
-            --resource-group RenoPilotRG \
+            --name container-publicfw \
+            --resource-group RenoPilotContainerRG \
             --location australiaeast
 
           # Create Private Firewall
           az network firewall create \
-            --name privatefirewall \
-            --resource-group RenoPilotRG \
+            --name container-privatefw \
+            --resource-group RenoPilotContainerRG \
             --location australiaeast
 
     - name: Deploy Container Registry
       uses: azure/cli@v1
       with:
         inlineScript: |
-          ACR_NAME="renopilotregistry"
+          ACR_NAME="renopilotcontreg"
           # Premium SKU required for advanced features:
           # - Virtual Network support
           # - Enhanced throughput
           # - Geo-replication capability
           # - Content trust for image tag signing
           az acr create \
-            --resource-group RenoPilotRG \
+            --resource-group RenoPilotContainerRG \
             --name $ACR_NAME \
             --sku Premium \
             --location australiaeast \
@@ -198,16 +197,16 @@ jobs:
     - name: Deploy to Azure Container Instances
       uses: azure/aci-deploy@v1
       with:
-        resource-group: RenoPilotRG
-        dns-name-label: renopilot-${{ github.run_number }}
+        resource-group: RenoPilotContainerRG
+        dns-name-label: renopilot-container-${{ github.run_number }}
         image: ${{ env.ACR_LOGIN_SERVER }}/renopilot-fenceapp:${{ github.sha }}
         registry-login-server: ${{ env.ACR_LOGIN_SERVER }}
         registry-username: ${{ env.ACR_USERNAME }}
         registry-password: ${{ env.ACR_PASSWORD }}
         name: renopilotfenceappinstance
         location: australiaeast
-        vnet: renopilot-vpc
-        subnet: PublicSubnet
+        vnet: renopilot-container-vpc
+        subnet: ContainerPublicSubnet
         ports: 80 3838
         environment-variables: DOCKER_ENV=true DB_SERVER=shiny.database.windows.net DB_NAME=Shiny DB_USER=shiny DB_DRIVER="ODBC Driver 18 for SQL Server" DB_PORT=1433
         secure-environment-variables: DB_PASSWORD=${{ secrets.DB_PASSWORD }}
@@ -222,9 +221,9 @@ jobs:
             --collection-name sqltraffic \
             --name SQLRule \
             --destination-ports 1433 \
-            --firewall-name privatefirewall \
+            --firewall-name container-privatefw \
             --protocols TCP \
-            --resource-group RenoPilotRG \
+            --resource-group RenoPilotContainerRG \
             --source-addresses 10.0.1.0/24 \
             --destination-addresses "*" \
             --action Allow \
@@ -235,9 +234,9 @@ jobs:
             --collection-name dockertraffic \
             --name DockerRule \
             --destination-ports 5000 \
-            --firewall-name privatefirewall \
+            --firewall-name container-privatefw \
             --protocols TCP \
-            --resource-group RenoPilotRG \
+            --resource-group RenoPilotContainerRG \
             --source-addresses 10.0.1.0/24 \
             --destination-addresses 10.0.2.0/24 \
             --action Allow \
@@ -248,9 +247,9 @@ jobs:
             --collection-name webtraffic \
             --name HTTPRule \
             --destination-ports 80 \
-            --firewall-name publicfirewall \
+            --firewall-name container-publicfw \
             --protocols TCP \
-            --resource-group RenoPilotRG \
+            --resource-group RenoPilotContainerRG \
             --source-addresses "*" \
             --destination-addresses 10.0.1.0/24 \
             --action Allow \
@@ -261,9 +260,9 @@ jobs:
             --collection-name shinytraffic \
             --name ShinyRule \
             --destination-ports 3838 \
-            --firewall-name publicfirewall \
+            --firewall-name container-publicfw \
             --protocols TCP \
-            --resource-group RenoPilotRG \
+            --resource-group RenoPilotContainerRG \
             --source-addresses "*" \
             --destination-addresses 10.0.1.0/24 \
             --action Allow \
@@ -271,13 +270,13 @@ jobs:
           
           # Fix VNet name in subnet reference
           echo "Configuring Azure SQL Server firewall rules..."
-          SUBNET_ADDRESS_PREFIX=$(az network vnet subnet show --resource-group RenoPilotRG --vnet-name renopilot-vpc --name PublicSubnet --query addressPrefix -o tsv)
+          SUBNET_ADDRESS_PREFIX=$(az network vnet subnet show --resource-group RenoPilotContainerRG --vnet-name renopilot-container-vpc --name ContainerPublicSubnet --query addressPrefix -o tsv)
           
           # Only try to create the firewall rule if the subnet was found
           if [ -n "$SUBNET_ADDRESS_PREFIX" ]; then
             echo "Found subnet prefix: $SUBNET_ADDRESS_PREFIX"
             az sql server firewall-rule create \
-              --resource-group RenoPilotRG \
+              --resource-group RenoPilotContainerRG \
               --server shiny \
               --name "AllowContainerSubnet" \
               --start-ip-address ${SUBNET_ADDRESS_PREFIX%/*} \
